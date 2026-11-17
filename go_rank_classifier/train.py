@@ -154,8 +154,9 @@ def run(args: argparse.Namespace) -> None:
         model.train()
         running_loss = 0.0
         seen = 0
+        stopped_early = False
         epoch_started = time.time()
-        for features, labels in train_loader:
+        for step, (features, labels) in enumerate(train_loader):
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -167,6 +168,13 @@ def run(args: argparse.Namespace) -> None:
             scaler.update()
             running_loss += float(loss.detach()) * labels.numel()
             seen += int(labels.numel())
+            if (
+                args.max_seconds is not None
+                and step % 50 == 0
+                and time.time() - started >= args.max_seconds
+            ):
+                stopped_early = True
+                break
 
         scheduler.step()
         val_accuracy, val_top3 = evaluate(model, val_loader, device)
@@ -177,6 +185,7 @@ def run(args: argparse.Namespace) -> None:
             "val_top3_accuracy": val_top3,
             "lr": optimizer.param_groups[0]["lr"],
             "seconds": round(time.time() - epoch_started, 1),
+            "partial": stopped_early,
         }
         history.append(row)
         print(json.dumps(row), flush=True)
@@ -212,6 +221,19 @@ def run(args: argparse.Namespace) -> None:
                 encoding="utf-8",
             )
 
+        if stopped_early:
+            print(
+                json.dumps(
+                    {
+                        "stopped": "max_seconds",
+                        "elapsed_seconds": round(time.time() - started, 1),
+                        "epochs_recorded": len(history),
+                    }
+                ),
+                flush=True,
+            )
+            break
+
     with (output / "history.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(history[0]))
         writer.writeheader()
@@ -234,6 +256,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit-val", type=int)
     parser.add_argument("--resume")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help="Wall-clock budget for training; stops at the next 50-step check once exceeded.",
+    )
     return parser
 
 
