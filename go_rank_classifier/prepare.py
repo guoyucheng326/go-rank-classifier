@@ -4,6 +4,7 @@ import argparse
 import json
 import random
 import re
+import shutil
 import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -11,19 +12,20 @@ from pathlib import Path
 
 import numpy as np
 
-from .ranks import RANKS
+from .ranks import RANKS, RANK_TO_ID
 from .sgf import MAX_VALID_MOVES, MIN_MOVES, TRUNCATE_MOVES, iter_sgf_bytes, parse_sgf_bytes
 
 _FIRST_VOLUME_PATTERN = re.compile(r"\.7z(?:\.001)?$", re.IGNORECASE)
+_SPLITS = ("train", "val", "test")
 
 
 def archive_paths(rank_dir: Path) -> list[Path]:
-    paths = [
+    """Return each logical archive once, ignoring follow-on .7z.002 volumes."""
+    return [
         path
         for path in sorted(rank_dir.iterdir())
         if path.is_file() and _FIRST_VOLUME_PATTERN.search(path.name)
     ]
-    return paths
 
 
 def _iter_archive_sgfs(path: Path):
@@ -44,12 +46,14 @@ def _iter_archive_sgfs(path: Path):
             raise RuntimeError(f"7z failed for {path}: {stderr.strip()}")
 
 
-def sample_rank(
+def prepare_rank(
     archive_root: str,
     rank: str,
     per_class: int,
     seed: int,
-) -> tuple[str, np.ndarray, np.ndarray, dict[str, int]]:
+    shard_root: str,
+) -> tuple[str, dict[str, int], dict[str, int | float]]:
+    """Stream one rank and write mmap-friendly train/val/test shards."""
     rank_dir = Path(archive_root) / rank
     paths = archive_paths(rank_dir)
     if not paths:
@@ -73,115 +77,164 @@ def sample_rank(
             if not (MIN_MOVES <= game.move_count <= MAX_VALID_MOVES):
                 rejected_length += 1
                 continue
+
             seen_accepted += 1
             packed = np.full(TRUNCATE_MOVES, -1, dtype=np.int16)
             moves = game.truncated_moves()
             packed[: len(moves)] = moves
-            if len(reservoir) < per_class:
+
+            if per_class <= 0:
+                reservoir.append(packed)
+            elif len(reservoir) < per_class:
                 reservoir.append(packed)
             else:
                 replacement = rng.randrange(seen_accepted)
                 if replacement < per_class:
                     reservoir[replacement] = packed
 
-    moves_array = np.stack(reservoir) if reservoir else np.empty((0, TRUNCATE_MOVES), np.int16)
-    lengths = np.array(
-        [int(np.count_nonzero(row != -1)) for row in moves_array], dtype=np.int16
-    )
+    moves = np.stack(reservoir) if reservoir else np.empty((0, TRUNCATE_MOVES), np.int16)
+    lengths = np.count_nonzero(moves != -1, axis=1).astype(np.int16)
+    labels = np.full(len(moves), RANK_TO_ID[rank], dtype=np.int16)
 
-    stats = {
+    split_rng = np.random.default_rng(seed + RANK_TO_ID[rank])
+    order = split_rng.permutation(len(moves))
+    train_end = int(len(order) * 0.8)
+    val_end = int(len(order) * 0.9)
+    portions = {
+        "train": order[:train_end],
+        "val": order[train_end:val_end],
+        "test": order[val_end:],
+    }
+
+    counts: dict[str, int] = {}
+    rank_shard = Path(shard_root) / rank
+    for split, indices in portions.items():
+        destination = rank_shard / split
+        destination.mkdir(parents=True, exist_ok=True)
+        np.save(destination / "moves.npy", moves[indices], allow_pickle=False)
+        np.save(destination / "lengths.npy", lengths[indices], allow_pickle=False)
+        np.save(destination / "labels.npy", labels[indices], allow_pickle=False)
+        counts[split] = int(len(indices))
+
+    stats: dict[str, int | float] = {
         "seen_games": seen_games,
         "accepted_games": seen_accepted,
+        "sampled_games": len(moves),
         "rejected_length": rejected_length,
         "rejected_board": rejected_board,
-        "sample_size": len(reservoir),
         "seconds": round(time.time() - started, 3),
     }
     print(
-        f"{rank:>3}: accepted={seen_accepted:,} sampled={len(reservoir):,} "
+        f"{rank:>3}: accepted={seen_accepted:,} stored={len(moves):,} "
         f"seen={seen_games:,} time={stats['seconds']:.1f}s",
         flush=True,
     )
-    return rank, moves_array, lengths, stats
+    return rank, counts, stats
 
 
-def _split_records(
-    rank: str,
-    moves: np.ndarray,
-    lengths: np.ndarray,
-    seed: int,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[int]]:
-    from .ranks import RANK_TO_ID
-
-    rng = np.random.default_rng(seed + RANK_TO_ID[rank])
-    order = rng.permutation(len(moves))
-    train_end = int(len(order) * 0.8)
-    val_end = int(len(order) * 0.9)
-    portions = (order[:train_end], order[train_end:val_end], order[val_end:])
-    return (
-        [moves[index] for index in portions],
-        [lengths[index] for index in portions],
-        [np.full(len(index), RANK_TO_ID[rank], dtype=np.int16) for index in portions],
-        [len(index) for index in portions],
-    )
-
-
-def _concat(parts: list[np.ndarray], dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarray:
-    if not parts:
-        return np.empty((0, *shape), dtype=dtype)
-    return np.stack(parts).astype(dtype, copy=False).reshape((-1, *shape))
+def _combine_shards(
+    output: Path,
+    shard_root: Path,
+    counts: dict[str, dict[str, int]],
+    ranks: list[str],
+) -> None:
+    """Combine per-rank shards without loading the full corpus into memory."""
+    for split in _SPLITS:
+        total = sum(counts.get(rank, {}).get(split, 0) for rank in ranks)
+        arrays = {
+            "moves": np.lib.format.open_memmap(
+                output / f"{split}_moves.npy",
+                mode="w+",
+                dtype=np.int16,
+                shape=(total, TRUNCATE_MOVES),
+            ),
+            "lengths": np.lib.format.open_memmap(
+                output / f"{split}_lengths.npy",
+                mode="w+",
+                dtype=np.int16,
+                shape=(total,),
+            ),
+            "labels": np.lib.format.open_memmap(
+                output / f"{split}_labels.npy",
+                mode="w+",
+                dtype=np.int16,
+                shape=(total,),
+            ),
+        }
+        cursor = 0
+        for rank in ranks:
+            count = counts.get(rank, {}).get(split, 0)
+            if count == 0:
+                continue
+            shard = shard_root / rank / split
+            for name, destination in arrays.items():
+                source = np.load(shard / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+                destination[cursor : cursor + count] = source
+                del source
+            cursor += count
+        for array in arrays.values():
+            array.flush()
+        del arrays
 
 
 def run(args: argparse.Namespace) -> None:
-    output = Path(args.output)
+    output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    split_moves: list[list[np.ndarray]] = [[], [], []]
-    split_lengths: list[list[np.ndarray]] = [[], [], []]
-    split_labels: list[list[np.ndarray]] = [[], [], []]
-    stats: dict[str, dict[str, int | float]] = {}
+    shard_root = output / "_rank_shards"
+    if shard_root.exists():
+        shutil.rmtree(shard_root)
+    shard_root.mkdir(parents=True)
 
-    selected_ranks = args.ranks or RANKS
+    for legacy in (
+        "labels.json",
+        "manifest.json",
+        "train.npz",
+        "val.npz",
+        "test.npz",
+        "train_moves.npy",
+        "train_lengths.npy",
+        "train_labels.npy",
+        "val_moves.npy",
+        "val_lengths.npy",
+        "val_labels.npy",
+        "test_moves.npy",
+        "test_lengths.npy",
+        "test_labels.npy",
+    ):
+        (output / legacy).unlink(missing_ok=True)
+
+    selected_ranks = list(args.ranks or RANKS)
     unknown = sorted(set(selected_ranks) - set(RANKS))
     if unknown:
         raise ValueError(f"Unknown ranks: {', '.join(unknown)}")
 
+    counts: dict[str, dict[str, int]] = {}
+    stats: dict[str, dict[str, int | float]] = {}
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
-                sample_rank,
+                prepare_rank,
                 str(Path(args.archive_root).resolve()),
                 rank,
                 args.per_class,
                 args.seed,
+                str(shard_root),
             ): rank
             for rank in selected_ranks
         }
         for future in as_completed(futures):
-            rank, moves, lengths, rank_stats = future.result()
+            rank, rank_counts, rank_stats = future.result()
+            counts[rank] = rank_counts
             stats[rank] = rank_stats
-            local_moves, local_lengths, labels, counts = _split_records(
-                rank, moves, lengths, args.seed
-            )
-            for split in range(3):
-                split_moves[split].extend(local_moves[split])
-                split_lengths[split].extend(local_lengths[split])
-                split_labels[split].extend(labels[split])
 
-    filenames = ("train.npz", "val.npz", "test.npz")
-    counts: dict[str, int] = {}
-    for split, filename in enumerate(filenames):
-        all_moves = _concat(split_moves[split], np.dtype("int16"), (TRUNCATE_MOVES,))
-        all_lengths = _concat(split_lengths[split], np.dtype("int16"), ())
-        all_labels = _concat(split_labels[split], np.dtype("int16"), ())
-        order = np.random.default_rng(args.seed + split).permutation(len(all_labels))
-        np.savez(
-            output / filename,
-            moves=all_moves[order],
-            lengths=all_lengths[order],
-            labels=all_labels[order],
-        )
-        counts[filename] = int(len(all_labels))
+    _combine_shards(output, shard_root, counts, selected_ranks)
+    shutil.rmtree(shard_root)
 
+    split_counts = {
+        split: sum(counts.get(rank, {}).get(split, 0) for rank in selected_ranks)
+        for split in _SPLITS
+    }
+    class_counts = {rank: counts[rank] for rank in RANKS if rank in counts}
     mapping = {str(index): rank for index, rank in enumerate(RANKS)}
     (output / "labels.json").write_text(
         json.dumps(mapping, ensure_ascii=False, indent=2) + "\n",
@@ -189,6 +242,7 @@ def run(args: argparse.Namespace) -> None:
     )
     manifest = {
         "source": "https://github.com/featurecat/go-dataset",
+        "format": "npy-memmap",
         "rules": {
             "min_moves": MIN_MOVES,
             "max_valid_moves": MAX_VALID_MOVES,
@@ -196,22 +250,28 @@ def run(args: argparse.Namespace) -> None:
             "per_class_cap": args.per_class,
             "board_size": 19,
         },
-        "splits": counts,
+        "splits": split_counts,
+        "class_counts": class_counts,
         "ranks": stats,
     }
     (output / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps(counts, indent=2))
+    print(json.dumps({"splits": split_counts, "class_counts": class_counts}, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Prepare SGF rank training data")
     parser.add_argument("--archive-root", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--per-class", type=int, default=20_000)
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--per-class",
+        type=int,
+        default=0,
+        help="Maximum games per rank; 0 keeps every accepted game (default).",
+    )
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
         "--ranks",
         nargs="+",
@@ -223,4 +283,3 @@ def build_parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     run(build_parser().parse_args())
-

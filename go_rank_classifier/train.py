@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import time
 from pathlib import Path
 
@@ -16,6 +17,16 @@ from torch.utils.data import DataLoader
 from .dataset import SGFGameDataset, load_split
 from .model import GoRankCNN
 from .ranks import RANKS
+
+
+def class_weights(labels: np.ndarray, num_classes: int, power: float) -> np.ndarray:
+    counts = np.bincount(np.asarray(labels), minlength=num_classes).astype(np.float64)
+    weights = np.ones(num_classes, dtype=np.float64)
+    present = counts > 0
+    if power > 0:
+        weights[present] = (counts[present].sum() / counts[present]) ** power
+        weights[present] /= weights[present].mean()
+    return weights.astype(np.float32)
 
 
 def evaluate(
@@ -46,44 +57,100 @@ def run(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("CUDA GPU is required for training")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
-    train_data = load_split(Path(args.data) / "train.npz")
-    val_data = load_split(Path(args.data) / "val.npz")
+    train_data = load_split(Path(args.data) / "train")
+    val_data = load_split(Path(args.data) / "val")
     train_dataset = SGFGameDataset(
         train_data, training=True, seed=args.seed, limit=args.limit_train
     )
     val_dataset = SGFGameDataset(
         val_data, training=False, seed=args.seed, limit=args.limit_val
     )
-    common = {
+    loader_options = {
         "num_workers": args.workers,
         "pin_memory": True,
-        "persistent_workers": args.workers > 0,
     }
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=True,
-        **common,
-    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        **common,
+        persistent_workers=args.workers > 0,
+        **loader_options,
     )
 
     model = GoRankCNN(num_classes=len(RANKS)).to(device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    weights = class_weights(
+        np.asarray(train_data.labels),
+        len(RANKS),
+        args.class_weight_power,
+    )
+    criterion = nn.CrossEntropyLoss(
+        weight=torch.from_numpy(weights).to(device),
+        label_smoothing=args.label_smoothing,
+    )
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.02)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    print(
+        json.dumps(
+            {
+                "train_samples": len(train_data),
+                "val_samples": len(val_data),
+                "class_counts": np.bincount(
+                    np.asarray(train_data.labels), minlength=len(RANKS)
+                ).tolist(),
+                "class_weights": weights.tolist(),
+            }
+        ),
+        flush=True,
+    )
 
     best_accuracy = -1.0
     history: list[dict[str, float | int]] = []
+    start_epoch = 1
+    if args.resume and Path(args.resume).is_file():
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state"])
+        if checkpoint.get("optimizer_state"):
+            optimizer.load_state_dict(checkpoint["optimizer_state"])
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        best_accuracy = float(
+            checkpoint.get("best_accuracy", checkpoint.get("val_accuracy", -1.0))
+        )
+        history_path = output / "history.csv"
+        if history_path.is_file():
+            with history_path.open(newline="", encoding="utf-8") as handle:
+                history = [
+                    {
+                        "epoch": int(row["epoch"]),
+                        "train_loss": float(row["train_loss"]),
+                        "val_accuracy": float(row["val_accuracy"]),
+                        "val_top3_accuracy": float(row["val_top3_accuracy"]),
+                        "lr": float(row["lr"]),
+                        "seconds": float(row["seconds"]),
+                    }
+                    for row in csv.DictReader(handle)
+                ]
+        print(
+            json.dumps({"resumed_from": args.resume, "start_epoch": start_epoch}),
+            flush=True,
+        )
+
     started = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, start_epoch + args.epochs):
+        # Recreate workers so every worker receives the current epoch value.
+        train_dataset.set_epoch(epoch)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=True,
+            **loader_options,
+        )
         model.train()
         running_loss = 0.0
         seen = 0
@@ -116,16 +183,20 @@ def run(args: argparse.Namespace) -> None:
 
         checkpoint = {
             "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
             "ranks": list(RANKS),
             "feature_channels": 22,
             "board_size": 19,
             "epoch": epoch,
             "val_accuracy": val_accuracy,
+            "best_accuracy": best_accuracy,
             "args": vars(args),
         }
         torch.save(checkpoint, output / "last.pt")
         if val_accuracy > best_accuracy:
             best_accuracy = val_accuracy
+            checkpoint["best_accuracy"] = best_accuracy
             torch.save(checkpoint, output / "best.pt")
             (output / "metrics.json").write_text(
                 json.dumps(
@@ -157,9 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
+    parser.add_argument("--class-weight-power", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--limit-train", type=int)
     parser.add_argument("--limit-val", type=int)
+    parser.add_argument("--resume")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     return parser
 

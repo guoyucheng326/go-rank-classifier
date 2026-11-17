@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
+import torch
 
+from go_rank_classifier.dataset import SGFGameDataset, SplitData, load_split
 from go_rank_classifier.features import PASS_MOVE, board_features, transform_moves
 from go_rank_classifier.sgf import iter_sgf_bytes, parse_sgf_bytes
 
@@ -44,6 +48,33 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(features[0, 3, 15], 1.0)
         self.assertEqual(features[1, 15, 3], 1.0)
         self.assertEqual(features.dtype, np.float32)
+
+
+class DatasetTests(unittest.TestCase):
+    def test_augmentation_changes_between_epochs(self) -> None:
+        moves = np.tile(np.arange(250, dtype=np.int16), (2, 1))
+        lengths = np.array([250, 180], dtype=np.int16)
+        data = SplitData(moves=moves, lengths=lengths, labels=np.array([1, 2], np.int16))
+        dataset = SGFGameDataset(data, training=True, seed=7)
+        choices = set()
+        for epoch in range(20):
+            dataset.set_epoch(epoch)
+            choices.add(dataset.augmentation_for(0))
+        self.assertGreater(len(choices), 1)
+
+        features, label = dataset[0]
+        self.assertEqual(tuple(features.shape), (22, 19, 19))
+        self.assertIsInstance(label, torch.Tensor)
+
+    def test_load_memmapped_split_arrays(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / "train"
+            np.save(prefix.with_name("train_moves.npy"), np.zeros((2, 300), np.int16))
+            np.save(prefix.with_name("train_lengths.npy"), np.array([100, 120], np.int16))
+            np.save(prefix.with_name("train_labels.npy"), np.array([0, 27], np.int16))
+            split = load_split(prefix)
+            self.assertEqual(len(split), 2)
+            self.assertEqual(int(split.labels[1]), 27)
 
 
 if __name__ == "__main__":

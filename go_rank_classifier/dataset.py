@@ -22,12 +22,28 @@ class SplitData:
 
 
 def load_split(path: str | Path) -> SplitData:
-    with np.load(path, allow_pickle=False) as data:
-        return SplitData(
-            moves=data["moves"],
-            lengths=data["lengths"],
-            labels=data["labels"],
-        )
+    requested = Path(path)
+    if requested.is_file():
+        with np.load(requested, allow_pickle=False) as data:
+            return SplitData(
+                moves=data["moves"],
+                lengths=data["lengths"],
+                labels=data["labels"],
+            )
+
+    prefix = requested.with_suffix("") if requested.suffix == ".npz" else requested
+    files = {
+        name: prefix.with_name(f"{prefix.name}_{name}.npy")
+        for name in ("moves", "lengths", "labels")
+    }
+    missing = [str(file) for file in files.values() if not file.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing prepared arrays: {', '.join(missing)}")
+    return SplitData(
+        moves=np.load(files["moves"], mmap_mode="r", allow_pickle=False),
+        lengths=np.load(files["lengths"], mmap_mode="r", allow_pickle=False),
+        labels=np.load(files["labels"], mmap_mode="r", allow_pickle=False),
+    )
 
 
 class SGFGameDataset(Dataset):
@@ -45,21 +61,33 @@ class SGFGameDataset(Dataset):
         self.training = training
         self.seed = seed
         self.size = len(data) if limit is None else min(len(data), limit)
+        self.epoch = 0
 
     def __len__(self) -> int:
         return self.size
 
+    def set_epoch(self, epoch: int) -> None:
+        """Change the deterministic augmentation stream between epochs."""
+        self.epoch = epoch
+
+    def augmentation_for(self, index: int) -> tuple[int, int]:
+        length = int(self.data.lengths[index])
+        if not self.training:
+            return min(300, length), 0
+        mixed_seed = (
+            self.seed * 1_000_003
+            + self.epoch * 97_409
+            + int(index) * 2_654_435_761
+        ) & ((1 << 63) - 1)
+        rng = random.Random(mixed_seed)
+        cutoff = rng.randint(100, min(300, length))
+        symmetry = rng.randrange(8)
+        return cutoff, symmetry
+
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        rng = random.Random(self.seed + int(index))
         length = int(self.data.lengths[index])
         game_moves = self.data.moves[index, :length]
-
-        if self.training:
-            cutoff = rng.randint(100, min(300, length))
-            symmetry = rng.randrange(8)
-        else:
-            cutoff = min(300, length)
-            symmetry = 0
+        cutoff, symmetry = self.augmentation_for(index)
 
         game_moves = transform_moves(game_moves[:cutoff], symmetry)
         features = board_features(game_moves.tolist(), len(game_moves))

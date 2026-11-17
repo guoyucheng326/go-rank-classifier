@@ -51,17 +51,27 @@ intermediate SGF files.
 python -m go_rank_classifier.prepare \
   --archive-root /home/amax/datasets/go-dataset \
   --output data/prepared \
-  --per-class 20000 \
-  --workers 8
+  --per-class 0 \
+  --workers 4
 ```
+
+`--per-class 0` keeps every game that passes the main-line length and board-size
+filters. Small ranks such as `Pro`, `8d`, and `9d` therefore use all of their
+available records, while larger ranks contribute more data. Set a positive
+cap only when a smaller experiment is desired.
+
+Prepared moves are stored as memory-mapped `.npy` arrays. This avoids loading
+the full corpus into RAM during a daily training run.
 
 The output contains:
 
 ```text
 data/prepared/
-  train.npz
-  val.npz
-  test.npz
+  train_moves.npy
+  train_lengths.npy
+  train_labels.npy
+  val_*.npy
+  test_*.npy
   labels.json
   manifest.json
 ```
@@ -82,6 +92,54 @@ python -m go_rank_classifier.train \
 
 The best checkpoint is saved as `runs/go_rank/best.pt`. `history.csv` and
 `metrics.json` contain the training and evaluation results.
+
+The default `--class-weight-power 0.5` partially compensates for uneven class
+counts without throwing away games from large ranks. Set it to `0` for a
+natural-frequency loss, or `1` for fully inverse-frequency weighting.
+
+Resume from the latest checkpoint after an interruption or for a daily
+training run:
+
+```bash
+python -m go_rank_classifier.train \
+  --data data/prepared \
+  --output runs/go_rank \
+  --epochs 5 \
+  --resume runs/go_rank/last.pt
+```
+
+### Daily training command
+
+`scripts/train_daily.sh` prepares the cache when it is missing, resumes from
+`last.pt` when available, and writes a timestamped log:
+
+```bash
+chmod +x scripts/train_daily.sh
+scripts/train_daily.sh
+```
+
+Useful environment variables:
+
+| Variable | Default |
+|---|---|
+| `PYTHON` | `/opt/anaconda3/bin/python` |
+| `DATASET_ARCHIVES` | `/home/amax/datasets/go-dataset` |
+| `DATA_DIR` | `data/prepared` |
+| `RUN_DIR` | `runs/go_rank` |
+| `PER_CLASS` | `0` (all accepted games) |
+| `INITIAL_EPOCHS` | `5` |
+| `EPOCHS` | `1` |
+| `BATCH_SIZE` | `512` |
+| `WORKERS` | `12` |
+| `CLASS_WEIGHT_POWER` | `0.5` |
+| `FORCE_PREPARE` | `0` |
+
+On the first run the script trains `INITIAL_EPOCHS`. Subsequent daily runs
+resume from `last.pt` and train `EPOCHS` more epochs. Example crontab entry:
+
+```cron
+15 2 * * * cd /home/amax/go-rank-classifier && scripts/train_daily.sh
+```
 
 For a quick smoke test:
 

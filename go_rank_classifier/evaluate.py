@@ -27,7 +27,7 @@ def main() -> None:
     model = GoRankCNN(num_classes=len(state["ranks"])).to(device)
     model.load_state_dict(state["model_state"])
     dataset = SGFGameDataset(
-        load_split(Path(args.data) / f"{args.split}.npz"), training=False
+        load_split(Path(args.data) / args.split), training=False
     )
     loader = DataLoader(
         dataset,
