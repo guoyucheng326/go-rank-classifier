@@ -41,7 +41,7 @@ the `7z` command.
 python -m pip install -r requirements.txt
 ```
 
-## Prepare a balanced dataset
+## Prepare the training data
 
 Point `--archive-root` at the downloaded `go-dataset` repository. Archives are
 streamed through `7z`, so the expander does not create tens of millions of

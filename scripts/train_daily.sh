@@ -22,7 +22,7 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="logs/train_${TIMESTAMP}.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-if [[ "$FORCE_PREPARE" == "1" || ! -f "$DATA_DIR/manifest.json" ]]; then
+if [[ "$FORCE_PREPARE" == "1" || ! -f "$DATA_DIR/manifest.json" || ! -f "$DATA_DIR/train_moves.npy" ]]; then
   "$PYTHON" -m go_rank_classifier.prepare \
     --archive-root "$DATASET_ARCHIVES" \
     --output "$DATA_DIR" \
