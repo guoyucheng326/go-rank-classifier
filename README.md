@@ -111,7 +111,9 @@ python -m go_rank_classifier.train \
 ### Daily training command
 
 `scripts/train_daily.sh` prepares the cache when it is missing, resumes from
-`last.pt` when available, and writes a timestamped log:
+`last.pt` when available, and writes a timestamped log. It uses a fixed
+learning rate by default so a one-epoch daily schedule does not collapse to the
+cosine scheduler's minimum learning rate.
 
 ```bash
 chmod +x scripts/train_daily.sh
@@ -132,6 +134,8 @@ Useful environment variables:
 | `BATCH_SIZE` | `512` |
 | `WORKERS` | `12` |
 | `CLASS_WEIGHT_POWER` | `0.5` |
+| `SCHEDULER` | `fixed` |
+| `MAX_SECONDS` | unset |
 | `FORCE_PREPARE` | `0` |
 
 On the first run the script trains `INITIAL_EPOCHS`. Subsequent daily runs
@@ -140,6 +144,10 @@ resume from `last.pt` and train `EPOCHS` more epochs. Example crontab entry:
 ```cron
 15 2 * * * cd /home/amax/go-rank-classifier && scripts/train_daily.sh
 ```
+
+If `MAX_SECONDS` or `--max-seconds` stops an epoch partway through, `last.pt`
+stores the exact batch offset. The next run resumes that epoch and its sampler
+order rather than skipping the unprocessed samples.
 
 For a quick smoke test:
 

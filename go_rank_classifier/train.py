@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
-from .dataset import SGFGameDataset, load_split
+from .dataset import DeterministicBatchSampler, SGFGameDataset, load_split
 from .model import GoRankCNN
 from .ranks import RANKS
 
@@ -54,6 +54,7 @@ def evaluate(
 def run(args: argparse.Namespace) -> None:
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    history_path = output / "history.csv"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("CUDA GPU is required for training")
@@ -93,7 +94,11 @@ def run(args: argparse.Namespace) -> None:
         label_smoothing=args.label_smoothing,
     )
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.02)
+    scheduler = (
+        CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.02)
+        if args.scheduler == "cosine"
+        else None
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
     print(
         json.dumps(
@@ -112,16 +117,23 @@ def run(args: argparse.Namespace) -> None:
     best_accuracy = -1.0
     history: list[dict[str, float | int]] = []
     start_epoch = 1
+    start_batch = 0
     if args.resume and Path(args.resume).is_file():
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state"])
         if checkpoint.get("optimizer_state"):
             optimizer.load_state_dict(checkpoint["optimizer_state"])
-        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        progress = checkpoint.get("progress", {})
+        start_epoch = int(
+            progress.get("next_epoch", checkpoint.get("epoch", 0) + 1)
+        )
+        start_batch = int(progress.get("next_batch", 0))
         best_accuracy = float(
             checkpoint.get("best_accuracy", checkpoint.get("val_accuracy", -1.0))
         )
-        history_path = output / "history.csv"
+        if args.scheduler == "fixed":
+            for group in optimizer.param_groups:
+                group["lr"] = args.lr
         if history_path.is_file():
             with history_path.open(newline="", encoding="utf-8") as handle:
                 history = [
@@ -132,11 +144,18 @@ def run(args: argparse.Namespace) -> None:
                         "val_top3_accuracy": float(row["val_top3_accuracy"]),
                         "lr": float(row["lr"]),
                         "seconds": float(row["seconds"]),
+                        "partial": row.get("partial", "false").lower() == "true",
                     }
                     for row in csv.DictReader(handle)
                 ]
         print(
-            json.dumps({"resumed_from": args.resume, "start_epoch": start_epoch}),
+            json.dumps(
+                {
+                    "resumed_from": args.resume,
+                    "start_epoch": start_epoch,
+                    "start_batch": start_batch,
+                }
+            ),
             flush=True,
         )
 
@@ -144,11 +163,17 @@ def run(args: argparse.Namespace) -> None:
     for epoch in range(start_epoch, start_epoch + args.epochs):
         # Recreate workers so every worker receives the current epoch value.
         train_dataset.set_epoch(epoch)
+        batch_sampler = DeterministicBatchSampler(
+            len(train_dataset),
+            args.batch_size,
+            epoch,
+            args.seed,
+            start_batch=start_batch if epoch == start_epoch else 0,
+            drop_last=True,
+        )
         train_loader = DataLoader(
             train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            drop_last=True,
+            batch_sampler=batch_sampler,
             **loader_options,
         )
         model.train()
@@ -157,6 +182,7 @@ def run(args: argparse.Namespace) -> None:
         stopped_early = False
         epoch_started = time.time()
         for step, (features, labels) in enumerate(train_loader):
+            absolute_step = batch_sampler.start_batch + step
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -169,14 +195,50 @@ def run(args: argparse.Namespace) -> None:
             running_loss += float(loss.detach()) * labels.numel()
             seen += int(labels.numel())
             if (
+                args.checkpoint_every_batches > 0
+                and (absolute_step + 1) % args.checkpoint_every_batches == 0
+            ):
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "optimizer_state": optimizer.state_dict(),
+                        "scheduler_state": scheduler.state_dict() if scheduler else None,
+                        "ranks": list(RANKS),
+                        "feature_channels": 22,
+                        "board_size": 19,
+                        "epoch": epoch,
+                        "val_accuracy": None,
+                        "best_accuracy": best_accuracy,
+                        "progress": {
+                            "next_epoch": epoch,
+                            "next_batch": absolute_step + 1,
+                        },
+                        "args": vars(args),
+                    },
+                    output / "last.pt",
+                )
+                print(
+                    json.dumps(
+                        {
+                            "epoch": epoch,
+                            "batch": absolute_step + 1,
+                            "batches": len(batch_sampler.batches),
+                            "loss": running_loss / max(seen, 1),
+                            "elapsed_seconds": round(time.time() - started, 1),
+                        }
+                    ),
+                    flush=True,
+                )
+            if (
                 args.max_seconds is not None
-                and step % 50 == 0
+                and (step + 1) % 50 == 0
                 and time.time() - started >= args.max_seconds
             ):
                 stopped_early = True
                 break
 
-        scheduler.step()
+        if not stopped_early and scheduler is not None:
+            scheduler.step()
         val_accuracy, val_top3 = evaluate(model, val_loader, device)
         row = {
             "epoch": epoch,
@@ -189,21 +251,31 @@ def run(args: argparse.Namespace) -> None:
         }
         history.append(row)
         print(json.dumps(row), flush=True)
+        with history_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row))
+            writer.writeheader()
+            writer.writerows(history)
 
         checkpoint = {
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
+            "scheduler_state": scheduler.state_dict() if scheduler else None,
             "ranks": list(RANKS),
             "feature_channels": 22,
             "board_size": 19,
             "epoch": epoch,
             "val_accuracy": val_accuracy,
             "best_accuracy": best_accuracy,
+            "progress": {
+                "next_epoch": epoch if stopped_early else epoch + 1,
+                "next_batch": (
+                    batch_sampler.start_batch + step + 1 if stopped_early else 0
+                ),
+            },
             "args": vars(args),
         }
         torch.save(checkpoint, output / "last.pt")
-        if val_accuracy > best_accuracy:
+        if not stopped_early and val_accuracy > best_accuracy:
             best_accuracy = val_accuracy
             checkpoint["best_accuracy"] = best_accuracy
             torch.save(checkpoint, output / "best.pt")
@@ -234,12 +306,6 @@ def run(args: argparse.Namespace) -> None:
             )
             break
 
-    with (output / "history.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(history[0]))
-        writer.writeheader()
-        writer.writerows(history)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a Fox Go rank classifier")
     parser.add_argument("--data", required=True)
@@ -255,6 +321,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit-train", type=int)
     parser.add_argument("--limit-val", type=int)
     parser.add_argument("--resume")
+    parser.add_argument(
+        "--scheduler",
+        choices=("cosine", "fixed"),
+        default="cosine",
+        help="Use a fresh cosine cycle or a fixed learning rate for resumed runs.",
+    )
+    parser.add_argument("--checkpoint-every-batches", type=int, default=100)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--max-seconds",

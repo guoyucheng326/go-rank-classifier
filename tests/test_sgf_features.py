@@ -7,7 +7,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from go_rank_classifier.dataset import SGFGameDataset, SplitData, load_split
+from go_rank_classifier.dataset import (
+    DeterministicBatchSampler,
+    SGFGameDataset,
+    SplitData,
+    load_split,
+)
 from go_rank_classifier.features import PASS_MOVE, board_features, transform_moves
 from go_rank_classifier.sgf import iter_sgf_bytes, parse_sgf_bytes
 
@@ -75,6 +80,15 @@ class DatasetTests(unittest.TestCase):
             split = load_split(prefix)
             self.assertEqual(len(split), 2)
             self.assertEqual(int(split.labels[1]), 27)
+
+    def test_batch_sampler_resumes_without_reordering(self) -> None:
+        full = list(DeterministicBatchSampler(20, 4, 3, seed=11, drop_last=True))
+        resumed = list(
+            DeterministicBatchSampler(
+                20, 4, 3, seed=11, start_batch=2, drop_last=True
+            )
+        )
+        self.assertEqual(resumed, full[2:])
 
 
 if __name__ == "__main__":

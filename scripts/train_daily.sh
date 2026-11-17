@@ -15,6 +15,8 @@ BATCH_SIZE="${BATCH_SIZE:-512}"
 WORKERS="${WORKERS:-12}"
 LEARNING_RATE="${LEARNING_RATE:-0.001}"
 CLASS_WEIGHT_POWER="${CLASS_WEIGHT_POWER:-0.5}"
+SCHEDULER="${SCHEDULER:-fixed}"
+MAX_SECONDS="${MAX_SECONDS:-}"
 FORCE_PREPARE="${FORCE_PREPARE:-0}"
 
 mkdir -p "$RUN_DIR" logs
@@ -38,6 +40,11 @@ else
   RUN_EPOCHS="$INITIAL_EPOCHS"
 fi
 
+TIME_ARGS=()
+if [[ -n "$MAX_SECONDS" ]]; then
+  TIME_ARGS=(--max-seconds "$MAX_SECONDS")
+fi
+
 "$PYTHON" -m go_rank_classifier.train \
   --data "$DATA_DIR" \
   --output "$RUN_DIR" \
@@ -46,6 +53,8 @@ fi
   --workers "$WORKERS" \
   --lr "$LEARNING_RATE" \
   --class-weight-power "$CLASS_WEIGHT_POWER" \
-  "${RESUME_ARGS[@]}"
+  --scheduler "$SCHEDULER" \
+  "${RESUME_ARGS[@]}" \
+  "${TIME_ARGS[@]}"
 
 ln -sfn "$(basename "$LOG_FILE")" logs/latest.log

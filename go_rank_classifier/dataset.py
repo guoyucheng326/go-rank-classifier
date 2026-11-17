@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from .features import board_features, transform_moves
 
@@ -93,4 +93,40 @@ class SGFGameDataset(Dataset):
         features = board_features(game_moves.tolist(), len(game_moves))
         label = int(self.data.labels[index])
         return torch.from_numpy(features), torch.tensor(label, dtype=torch.long)
+
+
+class DeterministicBatchSampler(Sampler[list[int]]):
+    """Produce a reproducible shuffled epoch that can resume at a batch offset."""
+
+    def __init__(
+        self,
+        data_size: int,
+        batch_size: int,
+        epoch: int,
+        seed: int,
+        *,
+        start_batch: int = 0,
+        drop_last: bool = True,
+    ) -> None:
+        if data_size <= 0 or batch_size <= 0:
+            raise ValueError("data_size and batch_size must be positive")
+        self.data_size = data_size
+        self.batch_size = batch_size
+        self.start_batch = max(0, start_batch)
+        rng = np.random.default_rng(
+            (seed * 1_000_003 + epoch * 97_409) & ((1 << 63) - 1)
+        )
+        order = rng.permutation(data_size)
+        full_size = (data_size // batch_size) * batch_size if drop_last else data_size
+        order = order[:full_size]
+        self.batches = [
+            order[start : start + batch_size].tolist()
+            for start in range(0, len(order), batch_size)
+        ]
+
+    def __iter__(self):
+        yield from self.batches[self.start_batch :]
+
+    def __len__(self) -> int:
+        return max(0, len(self.batches) - self.start_batch)
 
