@@ -1,0 +1,4 @@
+[pipeline] 2026-11-17 21:13:10 waiting for preparation to finish
+[2026-11-17 21:22:53] waiting for preparation to finish (budget 7200s after start)
+[2026-11-17 21:24:44] preparation finished; launching training with 7200s budget
+[2026-11-17 22:56:07] training exited with status 143

@@ -1,0 +1,6 @@
+{
+  "best_epoch": 7,
+  "best_val_accuracy": 0.21345543938451267,
+  "best_val_top3_accuracy": 0.5318767030932617,
+  "training_seconds": 4950.5
+}

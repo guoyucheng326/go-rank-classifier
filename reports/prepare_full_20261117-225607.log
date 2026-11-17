@@ -1,0 +1,200 @@
+Pro: accepted=4,397 stored=4,397 seen=4,806 time=0.9s
+ 8d: accepted=91,629 stored=91,629 seen=101,192 time=9.8s
+ 9d: accepted=111,671 stored=111,671 seen=120,517 time=14.4s
+ 7d: accepted=112,137 stored=112,137 seen=122,615 time=17.8s
+ 6d: accepted=321,590 stored=321,590 seen=348,229 time=47.6s
+ 5d: accepted=533,536 stored=533,536 seen=579,276 time=94.3s
+ 4d: accepted=784,116 stored=784,116 seen=852,543 time=141.3s
+ 3d: accepted=1,091,136 stored=1,091,136 seen=1,199,511 time=209.7s
+ 2d: accepted=957,398 stored=957,398 seen=1,050,065 time=177.9s
+ 1k: accepted=673,716 stored=673,716 seen=752,626 time=109.6s
+ 1d: accepted=1,149,396 stored=1,149,396 seen=1,278,949 time=174.7s
+ 3k: accepted=307,943 stored=307,943 seen=350,552 time=47.0s
+ 2k: accepted=427,106 stored=427,106 seen=481,721 time=68.1s
+ 4k: accepted=198,803 stored=198,803 seen=230,650 time=34.6s
+ 5k: accepted=273,026 stored=273,026 seen=325,693 time=39.6s
+ 6k: accepted=279,427 stored=279,427 seen=328,729 time=38.1s
+ 7k: accepted=263,083 stored=263,083 seen=310,203 time=36.2s
+ 8k: accepted=254,625 stored=254,625 seen=306,220 time=36.3s
+ 9k: accepted=238,903 stored=238,903 seen=303,242 time=34.4s
+11k: accepted=101,879 stored=101,879 seen=132,221 time=16.1s
+10k: accepted=168,305 stored=168,305 seen=214,590 time=24.0s
+13k: accepted=154,823 stored=154,823 seen=210,809 time=19.2s
+12k: accepted=189,865 stored=189,865 seen=252,926 time=23.2s
+15k: accepted=44,717 stored=44,717 seen=68,718 time=9.6s
+14k: accepted=126,173 stored=126,173 seen=177,969 time=17.8s
+17k: accepted=77,719 stored=77,719 seen=146,403 time=13.1s
+16k: accepted=158,111 stored=158,111 seen=265,562 time=20.9s
+18k: accepted=130,623 stored=130,623 seen=290,174 time=23.8s
+{
+  "splits": {
+    "train": 7380669,
+    "val": 922586,
+    "test": 922598
+  },
+  "class_counts": {
+    "Pro": {
+      "train": 3517,
+      "val": 440,
+      "test": 440
+    },
+    "9d": {
+      "train": 89336,
+      "val": 11167,
+      "test": 11168
+    },
+    "8d": {
+      "train": 73303,
+      "val": 9163,
+      "test": 9163
+    },
+    "7d": {
+      "train": 89709,
+      "val": 11214,
+      "test": 11214
+    },
+    "6d": {
+      "train": 257272,
+      "val": 32159,
+      "test": 32159
+    },
+    "5d": {
+      "train": 426828,
+      "val": 53354,
+      "test": 53354
+    },
+    "4d": {
+      "train": 627292,
+      "val": 78412,
+      "test": 78412
+    },
+    "3d": {
+      "train": 872908,
+      "val": 109114,
+      "test": 109114
+    },
+    "2d": {
+      "train": 765918,
+      "val": 95740,
+      "test": 95740
+    },
+    "1d": {
+      "train": 919516,
+      "val": 114940,
+      "test": 114940
+    },
+    "1k": {
+      "train": 538972,
+      "val": 67372,
+      "test": 67372
+    },
+    "2k": {
+      "train": 341684,
+      "val": 42711,
+      "test": 42711
+    },
+    "3k": {
+      "train": 246354,
+      "val": 30794,
+      "test": 30795
+    },
+    "4k": {
+      "train": 159042,
+      "val": 19880,
+      "test": 19881
+    },
+    "5k": {
+      "train": 218420,
+      "val": 27303,
+      "test": 27303
+    },
+    "6k": {
+      "train": 223541,
+      "val": 27943,
+      "test": 27943
+    },
+    "7k": {
+      "train": 210466,
+      "val": 26308,
+      "test": 26309
+    },
+    "8k": {
+      "train": 203700,
+      "val": 25462,
+      "test": 25463
+    },
+    "9k": {
+      "train": 191122,
+      "val": 23890,
+      "test": 23891
+    },
+    "10k": {
+      "train": 134644,
+      "val": 16830,
+      "test": 16831
+    },
+    "11k": {
+      "train": 81503,
+      "val": 10188,
+      "test": 10188
+    },
+    "12k": {
+      "train": 151892,
+      "val": 18986,
+      "test": 18987
+    },
+    "13k": {
+      "train": 123858,
+      "val": 15482,
+      "test": 15483
+    },
+    "14k": {
+      "train": 100938,
+      "val": 12617,
+      "test": 12618
+    },
+    "15k": {
+      "train": 35773,
+      "val": 4472,
+      "test": 4472
+    },
+    "16k": {
+      "train": 126488,
+      "val": 15811,
+      "test": 15812
+    },
+    "17k": {
+      "train": 62175,
+      "val": 7772,
+      "test": 7772
+    },
+    "18k": {
+      "train": 104498,
+      "val": 13062,
+      "test": 13063
+    }
+  }
+}
+	Command being timed: "python -m go_rank_classifier.prepare --archive-root /home/amax/datasets/go-dataset --output data/prepared --per-class 0 --workers 2"
+	User time (seconds): 1546.82
+	System time (seconds): 39.77
+	Percent of CPU this job got: 206%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:46.78
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 4447216
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 2999
+	Minor (reclaiming a frame) page faults: 7241938
+	Voluntary context switches: 7942183
+	Involuntary context switches: 6336136
+	Swaps: 0
+	File system inputs: 19007136
+	File system outputs: 21768744
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

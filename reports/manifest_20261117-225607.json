@@ -1,0 +1,384 @@
+{
+  "source": "https://github.com/featurecat/go-dataset",
+  "format": "npy-memmap",
+  "rules": {
+    "min_moves": 100,
+    "max_valid_moves": 350,
+    "truncate_moves": 300,
+    "per_class_cap": 0,
+    "board_size": 19
+  },
+  "splits": {
+    "train": 7380669,
+    "val": 922586,
+    "test": 922598
+  },
+  "class_counts": {
+    "Pro": {
+      "train": 3517,
+      "val": 440,
+      "test": 440
+    },
+    "9d": {
+      "train": 89336,
+      "val": 11167,
+      "test": 11168
+    },
+    "8d": {
+      "train": 73303,
+      "val": 9163,
+      "test": 9163
+    },
+    "7d": {
+      "train": 89709,
+      "val": 11214,
+      "test": 11214
+    },
+    "6d": {
+      "train": 257272,
+      "val": 32159,
+      "test": 32159
+    },
+    "5d": {
+      "train": 426828,
+      "val": 53354,
+      "test": 53354
+    },
+    "4d": {
+      "train": 627292,
+      "val": 78412,
+      "test": 78412
+    },
+    "3d": {
+      "train": 872908,
+      "val": 109114,
+      "test": 109114
+    },
+    "2d": {
+      "train": 765918,
+      "val": 95740,
+      "test": 95740
+    },
+    "1d": {
+      "train": 919516,
+      "val": 114940,
+      "test": 114940
+    },
+    "1k": {
+      "train": 538972,
+      "val": 67372,
+      "test": 67372
+    },
+    "2k": {
+      "train": 341684,
+      "val": 42711,
+      "test": 42711
+    },
+    "3k": {
+      "train": 246354,
+      "val": 30794,
+      "test": 30795
+    },
+    "4k": {
+      "train": 159042,
+      "val": 19880,
+      "test": 19881
+    },
+    "5k": {
+      "train": 218420,
+      "val": 27303,
+      "test": 27303
+    },
+    "6k": {
+      "train": 223541,
+      "val": 27943,
+      "test": 27943
+    },
+    "7k": {
+      "train": 210466,
+      "val": 26308,
+      "test": 26309
+    },
+    "8k": {
+      "train": 203700,
+      "val": 25462,
+      "test": 25463
+    },
+    "9k": {
+      "train": 191122,
+      "val": 23890,
+      "test": 23891
+    },
+    "10k": {
+      "train": 134644,
+      "val": 16830,
+      "test": 16831
+    },
+    "11k": {
+      "train": 81503,
+      "val": 10188,
+      "test": 10188
+    },
+    "12k": {
+      "train": 151892,
+      "val": 18986,
+      "test": 18987
+    },
+    "13k": {
+      "train": 123858,
+      "val": 15482,
+      "test": 15483
+    },
+    "14k": {
+      "train": 100938,
+      "val": 12617,
+      "test": 12618
+    },
+    "15k": {
+      "train": 35773,
+      "val": 4472,
+      "test": 4472
+    },
+    "16k": {
+      "train": 126488,
+      "val": 15811,
+      "test": 15812
+    },
+    "17k": {
+      "train": 62175,
+      "val": 7772,
+      "test": 7772
+    },
+    "18k": {
+      "train": 104498,
+      "val": 13062,
+      "test": 13063
+    }
+  },
+  "ranks": {
+    "Pro": {
+      "seen_games": 4806,
+      "accepted_games": 4397,
+      "sampled_games": 4397,
+      "rejected_length": 409,
+      "rejected_board": 0,
+      "seconds": 0.892
+    },
+    "8d": {
+      "seen_games": 101192,
+      "accepted_games": 91629,
+      "sampled_games": 91629,
+      "rejected_length": 9563,
+      "rejected_board": 0,
+      "seconds": 9.832
+    },
+    "9d": {
+      "seen_games": 120517,
+      "accepted_games": 111671,
+      "sampled_games": 111671,
+      "rejected_length": 8846,
+      "rejected_board": 0,
+      "seconds": 14.424
+    },
+    "7d": {
+      "seen_games": 122615,
+      "accepted_games": 112137,
+      "sampled_games": 112137,
+      "rejected_length": 10478,
+      "rejected_board": 0,
+      "seconds": 17.776
+    },
+    "6d": {
+      "seen_games": 348229,
+      "accepted_games": 321590,
+      "sampled_games": 321590,
+      "rejected_length": 26639,
+      "rejected_board": 0,
+      "seconds": 47.588
+    },
+    "5d": {
+      "seen_games": 579276,
+      "accepted_games": 533536,
+      "sampled_games": 533536,
+      "rejected_length": 45740,
+      "rejected_board": 0,
+      "seconds": 94.297
+    },
+    "4d": {
+      "seen_games": 852543,
+      "accepted_games": 784116,
+      "sampled_games": 784116,
+      "rejected_length": 68427,
+      "rejected_board": 0,
+      "seconds": 141.323
+    },
+    "3d": {
+      "seen_games": 1199511,
+      "accepted_games": 1091136,
+      "sampled_games": 1091136,
+      "rejected_length": 108375,
+      "rejected_board": 0,
+      "seconds": 209.728
+    },
+    "2d": {
+      "seen_games": 1050065,
+      "accepted_games": 957398,
+      "sampled_games": 957398,
+      "rejected_length": 92667,
+      "rejected_board": 0,
+      "seconds": 177.859
+    },
+    "1k": {
+      "seen_games": 752626,
+      "accepted_games": 673716,
+      "sampled_games": 673716,
+      "rejected_length": 78910,
+      "rejected_board": 0,
+      "seconds": 109.577
+    },
+    "1d": {
+      "seen_games": 1278949,
+      "accepted_games": 1149396,
+      "sampled_games": 1149396,
+      "rejected_length": 129553,
+      "rejected_board": 0,
+      "seconds": 174.681
+    },
+    "3k": {
+      "seen_games": 350552,
+      "accepted_games": 307943,
+      "sampled_games": 307943,
+      "rejected_length": 42609,
+      "rejected_board": 0,
+      "seconds": 47.001
+    },
+    "2k": {
+      "seen_games": 481721,
+      "accepted_games": 427106,
+      "sampled_games": 427106,
+      "rejected_length": 54615,
+      "rejected_board": 0,
+      "seconds": 68.055
+    },
+    "4k": {
+      "seen_games": 230650,
+      "accepted_games": 198803,
+      "sampled_games": 198803,
+      "rejected_length": 31847,
+      "rejected_board": 0,
+      "seconds": 34.615
+    },
+    "5k": {
+      "seen_games": 325693,
+      "accepted_games": 273026,
+      "sampled_games": 273026,
+      "rejected_length": 52667,
+      "rejected_board": 0,
+      "seconds": 39.586
+    },
+    "6k": {
+      "seen_games": 328729,
+      "accepted_games": 279427,
+      "sampled_games": 279427,
+      "rejected_length": 49302,
+      "rejected_board": 0,
+      "seconds": 38.106
+    },
+    "7k": {
+      "seen_games": 310203,
+      "accepted_games": 263083,
+      "sampled_games": 263083,
+      "rejected_length": 47120,
+      "rejected_board": 0,
+      "seconds": 36.193
+    },
+    "8k": {
+      "seen_games": 306220,
+      "accepted_games": 254625,
+      "sampled_games": 254625,
+      "rejected_length": 51595,
+      "rejected_board": 0,
+      "seconds": 36.286
+    },
+    "9k": {
+      "seen_games": 303242,
+      "accepted_games": 238903,
+      "sampled_games": 238903,
+      "rejected_length": 64339,
+      "rejected_board": 0,
+      "seconds": 34.384
+    },
+    "11k": {
+      "seen_games": 132221,
+      "accepted_games": 101879,
+      "sampled_games": 101879,
+      "rejected_length": 30342,
+      "rejected_board": 0,
+      "seconds": 16.147
+    },
+    "10k": {
+      "seen_games": 214590,
+      "accepted_games": 168305,
+      "sampled_games": 168305,
+      "rejected_length": 46285,
+      "rejected_board": 0,
+      "seconds": 23.98
+    },
+    "13k": {
+      "seen_games": 210809,
+      "accepted_games": 154823,
+      "sampled_games": 154823,
+      "rejected_length": 55986,
+      "rejected_board": 0,
+      "seconds": 19.237
+    },
+    "12k": {
+      "seen_games": 252926,
+      "accepted_games": 189865,
+      "sampled_games": 189865,
+      "rejected_length": 63061,
+      "rejected_board": 0,
+      "seconds": 23.216
+    },
+    "15k": {
+      "seen_games": 68718,
+      "accepted_games": 44717,
+      "sampled_games": 44717,
+      "rejected_length": 24001,
+      "rejected_board": 0,
+      "seconds": 9.626
+    },
+    "14k": {
+      "seen_games": 177969,
+      "accepted_games": 126173,
+      "sampled_games": 126173,
+      "rejected_length": 51796,
+      "rejected_board": 0,
+      "seconds": 17.847
+    },
+    "17k": {
+      "seen_games": 146403,
+      "accepted_games": 77719,
+      "sampled_games": 77719,
+      "rejected_length": 68684,
+      "rejected_board": 0,
+      "seconds": 13.112
+    },
+    "16k": {
+      "seen_games": 265562,
+      "accepted_games": 158111,
+      "sampled_games": 158111,
+      "rejected_length": 107451,
+      "rejected_board": 0,
+      "seconds": 20.852
+    },
+    "18k": {
+      "seen_games": 290174,
+      "accepted_games": 130623,
+      "sampled_games": 130623,
+      "rejected_length": 159551,
+      "rejected_board": 0,
+      "seconds": 23.809
+    }
+  }
+}
