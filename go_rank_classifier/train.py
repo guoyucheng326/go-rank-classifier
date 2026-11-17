@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import random
+import signal
 import time
 from pathlib import Path
 
@@ -14,7 +15,13 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
-from .dataset import DeterministicBatchSampler, SGFGameDataset, load_split
+from .dataset import (
+    DeterministicBatchSampler,
+    PreShuffledBatchSampler,
+    SGFGameDataset,
+    load_split,
+)
+from .metrics import evaluate_loader, save_evaluation
 from .model import GoRankCNN
 from .ranks import RANKS
 
@@ -160,10 +167,30 @@ def run(args: argparse.Namespace) -> None:
         )
 
     started = time.time()
+    stop_requested = False
+    previous_handlers: dict[int, object] = {}
+
+    def request_stop(signum, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+        print(
+            json.dumps(
+                {"stop_requested": signal.Signals(signum).name}
+            ),
+            flush=True,
+        )
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_stop)
+
     for epoch in range(start_epoch, start_epoch + args.epochs):
         # Recreate workers so every worker receives the current epoch value.
         train_dataset.set_epoch(epoch)
-        batch_sampler = DeterministicBatchSampler(
+        sampler_class = (
+            PreShuffledBatchSampler if train_data.shuffled else DeterministicBatchSampler
+        )
+        batch_sampler = sampler_class(
             len(train_dataset),
             args.batch_size,
             epoch,
@@ -180,9 +207,14 @@ def run(args: argparse.Namespace) -> None:
         running_loss = 0.0
         seen = 0
         stopped_early = False
+        stop_reason = ""
         epoch_started = time.time()
         for step, (features, labels) in enumerate(train_loader):
             absolute_step = batch_sampler.start_batch + step
+            if stop_requested:
+                stopped_early = True
+                stop_reason = "signal"
+                break
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -222,7 +254,7 @@ def run(args: argparse.Namespace) -> None:
                         {
                             "epoch": epoch,
                             "batch": absolute_step + 1,
-                            "batches": len(batch_sampler.batches),
+                            "batches": batch_sampler.num_batches,
                             "loss": running_loss / max(seen, 1),
                             "elapsed_seconds": round(time.time() - started, 1),
                         }
@@ -235,6 +267,7 @@ def run(args: argparse.Namespace) -> None:
                 and time.time() - started >= args.max_seconds
             ):
                 stopped_early = True
+                stop_reason = "max_seconds"
                 break
 
         if not stopped_early and scheduler is not None:
@@ -248,6 +281,7 @@ def run(args: argparse.Namespace) -> None:
             "lr": optimizer.param_groups[0]["lr"],
             "seconds": round(time.time() - epoch_started, 1),
             "partial": stopped_early,
+            "stop_reason": stop_reason,
         }
         history.append(row)
         print(json.dumps(row), flush=True)
@@ -297,7 +331,7 @@ def run(args: argparse.Namespace) -> None:
             print(
                 json.dumps(
                     {
-                        "stopped": "max_seconds",
+                        "stopped": stop_reason,
                         "elapsed_seconds": round(time.time() - started, 1),
                         "epochs_recorded": len(history),
                     }
@@ -305,6 +339,48 @@ def run(args: argparse.Namespace) -> None:
                 flush=True,
             )
             break
+
+    for signum, handler in previous_handlers.items():
+        signal.signal(signum, handler)
+
+    if (
+        args.evaluate_test
+        and not stop_requested
+        and (output / "best.pt").is_file()
+    ):
+        best = torch.load(output / "best.pt", map_location=device, weights_only=False)
+        model.load_state_dict(best["model_state"])
+        test_data = load_split(Path(args.data) / "test")
+        test_dataset = SGFGameDataset(
+            test_data, training=False, seed=args.seed, limit=args.limit_test
+        )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            persistent_workers=args.workers > 0,
+            **loader_options,
+        )
+        test_labels, test_predictions, test_top3 = evaluate_loader(
+            model, test_loader, device
+        )
+        test_metrics = save_evaluation(
+            test_labels,
+            test_predictions,
+            output / "test_metrics.json",
+            top3_accuracy=float(test_top3.mean()),
+        )
+        print(
+            json.dumps(
+                {
+                    "test_accuracy": test_metrics["accuracy"],
+                    "test_top3_accuracy": test_metrics["top3_accuracy"],
+                    "test_macro_f1": test_metrics["macro_f1"],
+                    "test_adjacent_accuracy": test_metrics["adjacent_accuracy"],
+                }
+            ),
+            flush=True,
+        )
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a Fox Go rank classifier")
@@ -320,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--limit-train", type=int)
     parser.add_argument("--limit-val", type=int)
+    parser.add_argument("--limit-test", type=int)
     parser.add_argument("--resume")
     parser.add_argument(
         "--scheduler",
@@ -328,6 +405,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use a fresh cosine cycle or a fixed learning rate for resumed runs.",
     )
     parser.add_argument("--checkpoint-every-batches", type=int, default=100)
+    parser.add_argument(
+        "--evaluate-test",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--max-seconds",

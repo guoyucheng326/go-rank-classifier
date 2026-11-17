@@ -4,13 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from .dataset import SGFGameDataset, load_split
+from .metrics import evaluate_loader, save_evaluation
 from .model import GoRankCNN
-from .train import evaluate
 
 
 def main() -> None:
@@ -20,6 +19,7 @@ def main() -> None:
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--output")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,8 +36,28 @@ def main() -> None:
         num_workers=args.workers,
         pin_memory=device.type == "cuda",
     )
-    accuracy, top3 = evaluate(model, loader, device)
-    print(json.dumps({"split": args.split, "accuracy": accuracy, "top3_accuracy": top3}))
+    labels, predictions, top3_hits = evaluate_loader(model, loader, device)
+    destination = args.output or str(
+        Path(args.checkpoint).parent / f"evaluation_{args.split}.json"
+    )
+    result = save_evaluation(
+        labels,
+        predictions,
+        destination,
+        top3_accuracy=float(top3_hits.mean()),
+    )
+    print(
+        json.dumps(
+            {
+                "split": args.split,
+                "accuracy": result["accuracy"],
+                "top3_accuracy": result["top3_accuracy"],
+                "macro_f1": result["macro_f1"],
+                "adjacent_accuracy": result["adjacent_accuracy"],
+                "output": destination,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -9,12 +9,16 @@ import torch
 
 from go_rank_classifier.dataset import (
     DeterministicBatchSampler,
+    PreShuffledBatchSampler,
     SGFGameDataset,
     SplitData,
     load_split,
 )
+from go_rank_classifier.audit import audit
 from go_rank_classifier.features import PASS_MOVE, board_features, transform_moves
+from go_rank_classifier.metrics import classification_metrics
 from go_rank_classifier.sgf import iter_sgf_bytes, parse_sgf_bytes
+from go_rank_classifier.shuffle_data import shuffle_split
 
 
 class SGFParserTests(unittest.TestCase):
@@ -80,6 +84,7 @@ class DatasetTests(unittest.TestCase):
             split = load_split(prefix)
             self.assertEqual(len(split), 2)
             self.assertEqual(int(split.labels[1]), 27)
+        self.assertFalse(split.shuffled)
 
     def test_batch_sampler_resumes_without_reordering(self) -> None:
         full = list(DeterministicBatchSampler(20, 4, 3, seed=11, drop_last=True))
@@ -89,6 +94,57 @@ class DatasetTests(unittest.TestCase):
             )
         )
         self.assertEqual(resumed, full[2:])
+
+    def test_preshuffled_sampler_rotates_but_keeps_all_items(self) -> None:
+        batches = list(
+            PreShuffledBatchSampler(20, 4, epoch=2, seed=5, drop_last=True)
+        )
+        self.assertEqual(sorted(index for batch in batches for index in batch), list(range(20)))
+
+    def test_shuffle_split_creates_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / "train"
+            np.save(prefix.with_name("train_moves.npy"), np.arange(24, dtype=np.int16).reshape(4, 6))
+            np.save(prefix.with_name("train_lengths.npy"), np.array([6] * 4, np.int16))
+            np.save(prefix.with_name("train_labels.npy"), np.arange(4, dtype=np.int16))
+            shuffle_split(prefix, seed=9, block_size=2)
+            self.assertTrue(prefix.with_name("train.shuffled").is_file())
+            self.assertTrue(load_split(prefix).shuffled)
+
+    def test_duplicate_audit_detects_cross_split_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for split, labels in (
+                ("train", [0, 1]),
+                ("val", [0]),
+                ("test", [2]),
+            ):
+                rows = np.full((len(labels), 300), -1, dtype=np.int16)
+                rows[:, :100] = np.arange(100, dtype=np.int16)
+                if split == "train":
+                    rows[1, :100] = np.arange(100, 200, dtype=np.int16)
+                if split == "test":
+                    rows[0, :100] = np.arange(100, dtype=np.int16)
+                np.save(root / f"{split}_moves.npy", rows)
+                np.save(root / f"{split}_lengths.npy", np.full(len(labels), 100, np.int16))
+                np.save(root / f"{split}_labels.npy", np.array(labels, np.int16))
+            report = audit(root, block_size=1)
+            self.assertEqual(
+                report["cross_split_duplicates"]["train__test"], 1
+            )
+            self.assertEqual(report["duplicate_groups_with_conflicting_ranks"], 1)
+
+
+class MetricTests(unittest.TestCase):
+    def test_per_class_and_adjacent_accuracy(self) -> None:
+        result = classification_metrics(
+            np.array([0, 0, 1, 1, 2]),
+            np.array([0, 1, 1, 2, 2]),
+            ("A", "B", "C"),
+        )
+        self.assertEqual(result["accuracy"], 0.6)
+        self.assertEqual(result["adjacent_accuracy"], 1.0)
+        self.assertEqual(result["per_class"]["A"]["support"], 2)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ class SplitData:
     moves: np.ndarray
     lengths: np.ndarray
     labels: np.ndarray
+    shuffled: bool = False
 
     def __len__(self) -> int:
         return int(self.labels.shape[0])
@@ -29,6 +30,7 @@ def load_split(path: str | Path) -> SplitData:
                 moves=data["moves"],
                 lengths=data["lengths"],
                 labels=data["labels"],
+                shuffled=False,
             )
 
     prefix = requested.with_suffix("") if requested.suffix == ".npz" else requested
@@ -43,6 +45,7 @@ def load_split(path: str | Path) -> SplitData:
         moves=np.load(files["moves"], mmap_mode="r", allow_pickle=False),
         lengths=np.load(files["lengths"], mmap_mode="r", allow_pickle=False),
         labels=np.load(files["labels"], mmap_mode="r", allow_pickle=False),
+        shuffled=prefix.with_name(f"{prefix.name}.shuffled").is_file(),
     )
 
 
@@ -116,17 +119,50 @@ class DeterministicBatchSampler(Sampler[list[int]]):
         rng = np.random.default_rng(
             (seed * 1_000_003 + epoch * 97_409) & ((1 << 63) - 1)
         )
-        order = rng.permutation(data_size)
         full_size = (data_size // batch_size) * batch_size if drop_last else data_size
-        order = order[:full_size]
-        self.batches = [
-            order[start : start + batch_size].tolist()
-            for start in range(0, len(order), batch_size)
-        ]
+        self.order = rng.permutation(data_size)[:full_size]
+        self.num_batches = (full_size + batch_size - 1) // batch_size
 
     def __iter__(self):
-        yield from self.batches[self.start_batch :]
+        for batch_index in range(self.start_batch, self.num_batches):
+            start = batch_index * self.batch_size
+            yield self.order[start : start + self.batch_size].tolist()
 
     def __len__(self) -> int:
-        return max(0, len(self.batches) - self.start_batch)
+        return max(0, self.num_batches - self.start_batch)
+
+
+class PreShuffledBatchSampler(Sampler[list[int]]):
+    """Read an already-shuffled cache sequentially and rotate each epoch."""
+
+    def __init__(
+        self,
+        data_size: int,
+        batch_size: int,
+        epoch: int,
+        seed: int,
+        *,
+        start_batch: int = 0,
+        drop_last: bool = True,
+    ) -> None:
+        if data_size <= 0 or batch_size <= 0:
+            raise ValueError("data_size and batch_size must be positive")
+        usable = (data_size // batch_size) * batch_size if drop_last else data_size
+        self.num_batches = (usable + batch_size - 1) // batch_size
+        rng = np.random.default_rng(
+            (seed * 1_000_003 + epoch * 97_409) & ((1 << 63) - 1)
+        )
+        self.rotation = int(rng.integers(0, max(self.num_batches, 1)))
+        self.usable = usable
+        self.batch_size = batch_size
+        self.start_batch = max(0, start_batch)
+
+    def __iter__(self):
+        for offset in range(self.start_batch, self.num_batches):
+            batch_index = (self.rotation + offset) % self.num_batches
+            start = batch_index * self.batch_size
+            yield range(start, min(start + self.batch_size, self.usable))
+
+    def __len__(self) -> int:
+        return max(0, self.num_batches - self.start_batch)
 

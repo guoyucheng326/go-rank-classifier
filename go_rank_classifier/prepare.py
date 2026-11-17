@@ -14,6 +14,7 @@ import numpy as np
 
 from .ranks import RANKS, RANK_TO_ID
 from .sgf import MAX_VALID_MOVES, MIN_MOVES, TRUNCATE_MOVES, iter_sgf_bytes, parse_sgf_bytes
+from .shuffle_data import shuffle_split
 
 _FIRST_VOLUME_PATTERN = re.compile(r"\.7z(?:\.001)?$", re.IGNORECASE)
 _SPLITS = ("train", "val", "test")
@@ -191,6 +192,9 @@ def run(args: argparse.Namespace) -> None:
         "train.npz",
         "val.npz",
         "test.npz",
+        "train.shuffled",
+        "val.shuffled",
+        "test.shuffled",
         "train_moves.npy",
         "train_lengths.npy",
         "train_labels.npy",
@@ -229,6 +233,14 @@ def run(args: argparse.Namespace) -> None:
 
     _combine_shards(output, shard_root, counts, selected_ranks)
     shutil.rmtree(shard_root)
+
+    if args.pre_shuffle:
+        for offset, split in enumerate(_SPLITS):
+            shuffle_split(
+                output / split,
+                args.seed + offset,
+                args.shuffle_block_size,
+            )
 
     split_counts = {
         split: sum(counts.get(rank, {}).get(split, 0) for rank in selected_ranks)
@@ -272,6 +284,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum games per rank; 0 keeps every accepted game (default).",
     )
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--pre-shuffle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Create a globally shuffled cache for sequential batch reads.",
+    )
+    parser.add_argument("--shuffle-block-size", type=int, default=131_072)
     parser.add_argument(
         "--ranks",
         nargs="+",

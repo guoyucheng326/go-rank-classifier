@@ -72,12 +72,24 @@ data/prepared/
   train_labels.npy
   val_*.npy
   test_*.npy
+  train.shuffled
+  val.shuffled
+  test.shuffled
   labels.json
   manifest.json
 ```
 
 Each game is stored as a compact sequence of board coordinates. CNN board
 features are built on demand, which keeps the prepared dataset relatively small.
+
+Prepare converts the grouped cache into a globally shuffled, memory-mapped
+cache. This allows training to read batches almost sequentially instead of
+causing one random disk read per game. To retrofit an existing cache without
+re-reading the source archives:
+
+```bash
+python -m go_rank_classifier.shuffle_data --data-dir data/prepared
+```
 
 ## Train
 
@@ -92,6 +104,11 @@ python -m go_rank_classifier.train \
 
 The best checkpoint is saved as `runs/go_rank/best.pt`. `history.csv` and
 `metrics.json` contain the training and evaluation results.
+
+After a normal run, the best checkpoint is evaluated automatically on the test
+split. `test_metrics.json`, `test_metrics_per_class.csv`, and
+`test_metrics_confusion.npy` contain overall, per-rank, and confusion-matrix
+results.
 
 The default `--class-weight-power 0.5` partially compensates for uneven class
 counts without throwing away games from large ranks. Set it to `0` for a
@@ -133,21 +150,30 @@ Useful environment variables:
 | `EPOCHS` | `1` |
 | `BATCH_SIZE` | `512` |
 | `WORKERS` | `12` |
+| `LEARNING_RATE` | `0.001` for a new run |
+| `RESUME_LR` | `0.0003` for resumed runs |
 | `CLASS_WEIGHT_POWER` | `0.5` |
 | `SCHEDULER` | `fixed` |
 | `MAX_SECONDS` | unset |
+| `SHUFFLE_DATA` | `1` |
 | `FORCE_PREPARE` | `0` |
 
 On the first run the script trains `INITIAL_EPOCHS`. Subsequent daily runs
 resume from `last.pt` and train `EPOCHS` more epochs. Example crontab entry:
 
 ```cron
-15 2 * * * cd /home/amax/go-rank-classifier && scripts/train_daily.sh
+15 2 * * * cd /path/to/go_ranker && scripts/train_daily.sh
 ```
 
 If `MAX_SECONDS` or `--max-seconds` stops an epoch partway through, `last.pt`
 stores the exact batch offset. The next run resumes that epoch and its sampler
 order rather than skipping the unprocessed samples.
+
+The daily script uses a lock file to prevent overlapping training jobs. Do not
+run `shuffle_data` while another training process is using the cache.
+
+`SIGTERM` and `SIGINT` are handled after the current batch so the model,
+optimizer, and batch progress are saved before exit.
 
 For a quick smoke test:
 
@@ -188,6 +214,30 @@ predictor = RankPredictor("runs/go_rank/best.pt")
 rank_id, rank_name = predictor.predict_file("game.sgf")
 print(rank_id, rank_name)
 ```
+
+## Evaluate and audit
+
+Evaluate a checkpoint and write overall metrics, per-rank metrics, and the
+confusion matrix:
+
+```bash
+python -m go_rank_classifier.evaluate \
+  --checkpoint runs/go_rank/best.pt \
+  --data data/prepared \
+  --split test
+```
+
+Audit exact duplicate main-line move sequences across train, validation, and
+test:
+
+```bash
+python -m go_rank_classifier.audit \
+  --data-dir data/prepared \
+  --output reports/duplicate_audit.json
+```
+
+The audit reports duplicate rows within each split, cross-split overlap, and
+duplicate move sequences assigned to different ranks.
 
 ## Input representation
 

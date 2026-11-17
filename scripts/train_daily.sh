@@ -14,15 +14,24 @@ EPOCHS="${EPOCHS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 WORKERS="${WORKERS:-12}"
 LEARNING_RATE="${LEARNING_RATE:-0.001}"
+RESUME_LR="${RESUME_LR:-0.0003}"
 CLASS_WEIGHT_POWER="${CLASS_WEIGHT_POWER:-0.5}"
 SCHEDULER="${SCHEDULER:-fixed}"
 MAX_SECONDS="${MAX_SECONDS:-}"
+SHUFFLE_DATA="${SHUFFLE_DATA:-1}"
 FORCE_PREPARE="${FORCE_PREPARE:-0}"
 
 mkdir -p "$RUN_DIR" logs
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="logs/train_${TIMESTAMP}.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+LOCK_FILE="$RUN_DIR/.train.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "Another training process is already using $RUN_DIR"
+  exit 0
+fi
 
 if [[ "$FORCE_PREPARE" == "1" || ! -f "$DATA_DIR/manifest.json" || ! -f "$DATA_DIR/train_moves.npy" ]]; then
   "$PYTHON" -m go_rank_classifier.prepare \
@@ -32,12 +41,20 @@ if [[ "$FORCE_PREPARE" == "1" || ! -f "$DATA_DIR/manifest.json" || ! -f "$DATA_D
     --workers 4
 fi
 
+if [[ "$SHUFFLE_DATA" == "1" && ! -f "$DATA_DIR/train.shuffled" ]]; then
+  "$PYTHON" -m go_rank_classifier.shuffle_data \
+    --data-dir "$DATA_DIR" \
+    --splits train val test
+fi
+
 RESUME_ARGS=()
 if [[ -f "$RUN_DIR/last.pt" ]]; then
   RESUME_ARGS=(--resume "$RUN_DIR/last.pt")
   RUN_EPOCHS="$EPOCHS"
+  ACTIVE_LR="$RESUME_LR"
 else
   RUN_EPOCHS="$INITIAL_EPOCHS"
+  ACTIVE_LR="$LEARNING_RATE"
 fi
 
 TIME_ARGS=()
@@ -51,7 +68,7 @@ fi
   --epochs "$RUN_EPOCHS" \
   --batch-size "$BATCH_SIZE" \
   --workers "$WORKERS" \
-  --lr "$LEARNING_RATE" \
+  --lr "$ACTIVE_LR" \
   --class-weight-power "$CLASS_WEIGHT_POWER" \
   --scheduler "$SCHEDULER" \
   "${RESUME_ARGS[@]}" \
