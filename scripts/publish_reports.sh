@@ -128,15 +128,22 @@ fi
 git commit -m "Add training logs ${TAG}" >/dev/null
 echo "report: committed $(git rev-parse --short HEAD)"
 
-push() {
-  git push origin "$BRANCH"
-}
-if push; then
-  echo "report: pushed to origin/$BRANCH"
-elif [[ -n "${GITEE_TOKEN:-}" ]]; then
-  echo "report: retrying push with GITEE_TOKEN"
-  git -c credential.helper='!f() { echo username=${GIT_USER:-guojianren123}; echo password=$GITEE_TOKEN; }; f' \
-    push origin "$BRANCH"
+# Never fall back to an interactive credential prompt: under VS Code the
+# GIT_ASKPASS helper blocks forever on "Username for 'https://gitee.com'".
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/true
+export GIT_USER="${GIT_USER:-guojianren123}"
+
+if [[ -n "${GITEE_TOKEN:-}" ]]; then
+  export GITEE_TOKEN
+  helper='!f() { echo username=$GIT_USER; echo password=$GITEE_TOKEN; }; f'
+  if timeout 180 git -c "credential.helper=$helper" push origin "$BRANCH"; then
+    echo "report: pushed to origin/$BRANCH"
+  else
+    echo "report: push failed via GITEE_TOKEN" >&2
+    exit 1
+  fi
+elif timeout 120 git push origin "$BRANCH"; then
   echo "report: pushed to origin/$BRANCH"
 else
   echo "report: push failed and GITEE_TOKEN is not set" >&2
