@@ -10,31 +10,88 @@ from torch.utils.data import DataLoader
 from .ranks import RANKS
 
 
+DECODERS = ("argmax", "expected", "median", "top3_expected")
+
+
+def transform_features(features: torch.Tensor, symmetry: int) -> torch.Tensor:
+    """Apply a dihedral transform to a batch of board feature tensors."""
+    if symmetry not in range(8):
+        raise ValueError("symmetry must be in [0, 7]")
+    transformed = torch.flip(features, dims=(3,)) if symmetry >= 4 else features
+    return torch.rot90(transformed, k=symmetry % 4, dims=(2, 3))
+
+
+def decode_probabilities(probabilities: np.ndarray, method: str) -> np.ndarray:
+    probabilities = np.asarray(probabilities)
+    if method == "argmax":
+        return probabilities.argmax(axis=1).astype(np.int16)
+    positions = np.arange(probabilities.shape[1], dtype=np.float64)
+    if method == "expected":
+        return np.rint(probabilities @ positions).astype(np.int16)
+    if method == "median":
+        cumulative = np.cumsum(probabilities, axis=1)
+        return (cumulative < 0.5).sum(axis=1).astype(np.int16)
+    if method == "top3_expected":
+        top = np.argpartition(probabilities, -3, axis=1)[:, -3:]
+        masked = np.zeros_like(probabilities)
+        rows = np.arange(probabilities.shape[0])[:, None]
+        masked[rows, top] = probabilities[rows, top]
+        totals = masked.sum(axis=1, keepdims=True)
+        normalized = masked / np.maximum(totals, 1e-12)
+        return np.rint(normalized @ positions).astype(np.int16)
+    raise ValueError(f"Unknown decoder: {method}")
+
+
+def predict_loader(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    symmetries: tuple[int, ...] = (0,),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return labels and mean class probabilities over board symmetries."""
+    model.eval()
+    true_batches: list[np.ndarray] = []
+    probability_batches: list[np.ndarray] = []
+    with torch.inference_mode():
+        for batch in loader:
+            if len(batch) == 3:
+                features, tabular, labels = batch
+                tabular = tabular.to(device, non_blocking=True)
+            else:
+                features, labels = batch
+                tabular = None
+            features = features.to(device, non_blocking=True)
+            probability = torch.zeros(
+                (features.shape[0], len(RANKS)),
+                dtype=torch.float32,
+                device=device,
+            )
+            for symmetry in symmetries:
+                logits = model(transform_features(features, symmetry), tabular)
+                probability += torch.softmax(logits, dim=1)
+            probability /= len(symmetries)
+            probability_batches.append(probability.cpu().numpy())
+            true_batches.append(labels.numpy())
+    return np.concatenate(true_batches), np.concatenate(probability_batches)
+
+
 def evaluate_loader(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
+    symmetries: tuple[int, ...] = (0,),
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return labels, top-1 predictions, and top-3 correctness."""
-    model.eval()
-    true_batches: list[np.ndarray] = []
-    prediction_batches: list[np.ndarray] = []
-    top3_batches: list[np.ndarray] = []
-    with torch.inference_mode():
-        for features, labels in loader:
-            features = features.to(device, non_blocking=True)
-            logits = model(features)
-            prediction_batches.append(logits.argmax(dim=1).cpu().numpy())
-            true_batches.append(labels.numpy())
-            top3 = logits.topk(min(3, logits.shape[1]), dim=1).indices
-            top3_batches.append(
-                top3.cpu().eq(labels[:, None]).any(dim=1).numpy()
-            )
-    return (
-        np.concatenate(true_batches),
-        np.concatenate(prediction_batches),
-        np.concatenate(top3_batches),
+    labels, probabilities = predict_loader(
+        model,
+        loader,
+        device,
+        symmetries=symmetries,
     )
+    predictions = decode_probabilities(probabilities, "argmax")
+    top3 = np.argpartition(probabilities, -3, axis=1)[:, -3:]
+    top3_hits = (top3 == labels[:, None]).any(axis=1)
+    return labels, predictions, top3_hits
 
 
 def classification_metrics(

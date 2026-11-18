@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
 from .dataset import (
@@ -21,9 +21,15 @@ from .dataset import (
     SGFGameDataset,
     load_split,
 )
-from .metrics import evaluate_loader, save_evaluation
+from .metrics import (
+    classification_metrics,
+    decode_probabilities,
+    predict_loader,
+    save_evaluation,
+)
 from .model import GoRankCNN
 from .ranks import RANKS
+from .losses import OrdinalSoftCrossEntropy
 
 
 def class_weights(labels: np.ndarray, num_classes: int, power: float) -> np.ndarray:
@@ -40,22 +46,21 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-) -> tuple[float, float]:
-    model.eval()
-    total = 0
-    correct = 0
-    top3_correct = 0
-    with torch.inference_mode():
-        for features, labels in loader:
-            features = features.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            logits = model(features)
-            prediction = logits.argmax(dim=1)
-            correct += int((prediction == labels).sum())
-            top3 = logits.topk(min(3, logits.shape[1]), dim=1).indices
-            top3_correct += int(top3.eq(labels[:, None]).any(dim=1).sum())
-            total += int(labels.numel())
-    return correct / max(total, 1), top3_correct / max(total, 1)
+    symmetries: tuple[int, ...] = (0,),
+) -> tuple[float, float, float, float]:
+    labels, probabilities = predict_loader(
+        model, loader, device, symmetries=symmetries
+    )
+    predictions = decode_probabilities(probabilities, "argmax")
+    metrics = classification_metrics(labels, predictions)
+    top3 = np.argpartition(probabilities, -3, axis=1)[:, -3:]
+    top3_accuracy = float((top3 == labels[:, None]).any(axis=1).mean())
+    return (
+        metrics["accuracy"],
+        top3_accuracy,
+        metrics["macro_f1"],
+        metrics["adjacent_accuracy"],
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -96,16 +101,21 @@ def run(args: argparse.Namespace) -> None:
         len(RANKS),
         args.class_weight_power,
     )
-    criterion = nn.CrossEntropyLoss(
-        weight=torch.from_numpy(weights).to(device),
-        label_smoothing=args.label_smoothing,
-    )
+    class_weights_tensor = torch.from_numpy(weights).to(device)
+    if args.loss == "ordinal-soft":
+        criterion = OrdinalSoftCrossEntropy(
+            class_weights_tensor,
+            sigma=args.ordinal_sigma,
+            soft_weight=args.ordinal_loss_weight,
+            distance_weight=args.distance_loss_weight,
+            label_smoothing=args.label_smoothing,
+        )
+    else:
+        criterion = nn.CrossEntropyLoss(
+            weight=class_weights_tensor,
+            label_smoothing=args.label_smoothing,
+        )
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = (
-        CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.02)
-        if args.scheduler == "cosine"
-        else None
-    )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
     print(
         json.dumps(
@@ -125,7 +135,11 @@ def run(args: argparse.Namespace) -> None:
     history: list[dict[str, float | int]] = []
     start_epoch = 1
     start_batch = 0
+    resumed = False
+    best_monitor_score = -float("inf")
+    epochs_without_improvement = 0
     if args.resume and Path(args.resume).is_file():
+        resumed = True
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state"])
         if checkpoint.get("optimizer_state"):
@@ -138,9 +152,10 @@ def run(args: argparse.Namespace) -> None:
         best_accuracy = float(
             checkpoint.get("best_accuracy", checkpoint.get("val_accuracy", -1.0))
         )
-        if args.scheduler == "fixed":
-            for group in optimizer.param_groups:
-                group["lr"] = args.lr
+        best_monitor_score = float(checkpoint.get("monitor_score", -float("inf")))
+        epochs_without_improvement = int(
+            checkpoint.get("epochs_without_improvement", 0)
+        )
         if history_path.is_file():
             with history_path.open(newline="", encoding="utf-8") as handle:
                 history = [
@@ -165,6 +180,35 @@ def run(args: argparse.Namespace) -> None:
             ),
             flush=True,
         )
+
+    for group in optimizer.param_groups:
+        group["lr"] = args.lr
+    scheduler = None
+    if args.scheduler == "cosine":
+        if args.warmup_epochs > 0 and not resumed and args.epochs > args.warmup_epochs:
+            warmup_epochs = args.warmup_epochs
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[
+                    LinearLR(
+                        optimizer,
+                        start_factor=0.1,
+                        total_iters=warmup_epochs,
+                    ),
+                    CosineAnnealingLR(
+                        optimizer,
+                        T_max=args.epochs - warmup_epochs,
+                        eta_min=args.lr * 0.02,
+                    ),
+                ],
+                milestones=[warmup_epochs],
+            )
+        else:
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=args.epochs,
+                eta_min=args.lr * 0.02,
+            )
 
     started = time.time()
     stop_requested = False
@@ -241,6 +285,9 @@ def run(args: argparse.Namespace) -> None:
                         "epoch": epoch,
                         "val_accuracy": None,
                         "best_accuracy": best_accuracy,
+                        "monitor_metric": args.early_stop_metric,
+                        "monitor_score": best_monitor_score,
+                        "epochs_without_improvement": epochs_without_improvement,
                         "progress": {
                             "next_epoch": epoch,
                             "next_batch": absolute_step + 1,
@@ -272,12 +319,40 @@ def run(args: argparse.Namespace) -> None:
 
         if not stopped_early and scheduler is not None:
             scheduler.step()
-        val_accuracy, val_top3 = evaluate(model, val_loader, device)
+        val_accuracy, val_top3, val_macro_f1, val_adjacent = evaluate(
+            model, val_loader, device
+        )
+        monitor_values = {
+            "top1": val_accuracy,
+            "macro_f1": val_macro_f1,
+            "composite": (
+                0.5 * val_macro_f1
+                + 0.3 * val_adjacent
+                + 0.2 * val_accuracy
+            ),
+        }
+        monitor_score = monitor_values[args.early_stop_metric]
+        improved = monitor_score > best_monitor_score + args.min_delta
+        if improved:
+            best_monitor_score = monitor_score
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        early_stop = (
+            not stopped_early
+            and args.patience > 0
+            and epochs_without_improvement >= args.patience
+        )
+        if early_stop:
+            stop_reason = "early_stopping"
         row = {
             "epoch": epoch,
             "train_loss": running_loss / max(seen, 1),
             "val_accuracy": val_accuracy,
             "val_top3_accuracy": val_top3,
+            "val_macro_f1": val_macro_f1,
+            "val_adjacent_accuracy": val_adjacent,
+            "monitor_score": monitor_score,
             "lr": optimizer.param_groups[0]["lr"],
             "seconds": round(time.time() - epoch_started, 1),
             "partial": stopped_early,
@@ -300,6 +375,9 @@ def run(args: argparse.Namespace) -> None:
             "epoch": epoch,
             "val_accuracy": val_accuracy,
             "best_accuracy": best_accuracy,
+            "monitor_metric": args.early_stop_metric,
+            "monitor_score": best_monitor_score,
+            "epochs_without_improvement": epochs_without_improvement,
             "progress": {
                 "next_epoch": epoch if stopped_early else epoch + 1,
                 "next_batch": (
@@ -309,9 +387,10 @@ def run(args: argparse.Namespace) -> None:
             "args": vars(args),
         }
         torch.save(checkpoint, output / "last.pt")
-        if not stopped_early and val_accuracy > best_accuracy:
-            best_accuracy = val_accuracy
+        if not stopped_early and improved:
+            best_accuracy = max(best_accuracy, val_accuracy)
             checkpoint["best_accuracy"] = best_accuracy
+            checkpoint["monitor_score"] = best_monitor_score
             torch.save(checkpoint, output / "best.pt")
             (output / "metrics.json").write_text(
                 json.dumps(
@@ -319,6 +398,10 @@ def run(args: argparse.Namespace) -> None:
                         "best_epoch": epoch,
                         "best_val_accuracy": best_accuracy,
                         "best_val_top3_accuracy": val_top3,
+                        "best_val_macro_f1": val_macro_f1,
+                        "best_val_adjacent_accuracy": val_adjacent,
+                        "monitor_metric": args.early_stop_metric,
+                        "best_monitor_score": best_monitor_score,
                         "training_seconds": round(time.time() - started, 1),
                     },
                     indent=2,
@@ -326,6 +409,20 @@ def run(args: argparse.Namespace) -> None:
                 + "\n",
                 encoding="utf-8",
             )
+
+        if early_stop:
+            print(
+                json.dumps(
+                    {
+                        "stopped": stop_reason,
+                        "epoch": epoch,
+                        "monitor_metric": args.early_stop_metric,
+                        "monitor_score": monitor_score,
+                    }
+                ),
+                flush=True,
+            )
+            break
 
         if stopped_early:
             print(
@@ -351,24 +448,55 @@ def run(args: argparse.Namespace) -> None:
         best = torch.load(output / "best.pt", map_location=device, weights_only=False)
         model.load_state_dict(best["model_state"])
         test_data = load_split(Path(args.data) / "test")
-        test_dataset = SGFGameDataset(
-            test_data, training=False, seed=args.seed, limit=args.limit_test
-        )
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            persistent_workers=args.workers > 0,
-            **loader_options,
-        )
-        test_labels, test_predictions, test_top3 = evaluate_loader(
-            model, test_loader, device
-        )
+        test_labels = None
+        test_probabilities = None
+        for cutoff in sorted(set(args.test_cutoffs)):
+            test_dataset = SGFGameDataset(
+                test_data,
+                training=False,
+                seed=args.seed,
+                limit=args.limit_test,
+                fixed_cutoff=cutoff,
+            )
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                **loader_options,
+            )
+            cutoff_labels, cutoff_probabilities = predict_loader(
+                model,
+                test_loader,
+                device,
+                symmetries=tuple(range(args.test_symmetries)),
+            )
+            if test_labels is None:
+                test_labels = cutoff_labels
+                test_probabilities = cutoff_probabilities
+            else:
+                if not (cutoff_labels == test_labels).all():
+                    raise RuntimeError("Test dataset order changed between cutoff passes")
+                test_probabilities += cutoff_probabilities
+        if test_labels is None or test_probabilities is None:
+            raise RuntimeError("No test cutoff was evaluated")
+        test_probabilities /= len(set(args.test_cutoffs))
+        test_predictions = decode_probabilities(test_probabilities, args.decode)
+        test_top3 = (
+            np.argpartition(test_probabilities, -3, axis=1)[:, -3:]
+            == test_labels[:, None]
+        ).any(axis=1)
         test_metrics = save_evaluation(
             test_labels,
             test_predictions,
             output / "test_metrics.json",
             top3_accuracy=float(test_top3.mean()),
+        )
+        test_metrics["decoder"] = args.decode
+        test_metrics["symmetries"] = args.test_symmetries
+        test_metrics["cutoffs"] = sorted(set(args.test_cutoffs))
+        (output / "test_metrics.json").write_text(
+            json.dumps(test_metrics, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
         print(
             json.dumps(
@@ -393,6 +521,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
     parser.add_argument("--class-weight-power", type=float, default=0.5)
+    parser.add_argument("--loss", choices=("ce", "ordinal-soft"), default="ordinal-soft")
+    parser.add_argument("--ordinal-sigma", type=float, default=1.0)
+    parser.add_argument("--ordinal-loss-weight", type=float, default=0.3)
+    parser.add_argument("--distance-loss-weight", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--limit-train", type=int)
     parser.add_argument("--limit-val", type=int)
@@ -404,7 +536,22 @@ def build_parser() -> argparse.ArgumentParser:
         default="cosine",
         help="Use a fresh cosine cycle or a fixed learning rate for resumed runs.",
     )
+    parser.add_argument("--warmup-epochs", type=int, default=1)
+    parser.add_argument(
+        "--early-stop-metric",
+        choices=("composite", "macro_f1", "top1"),
+        default="composite",
+    )
+    parser.add_argument("--patience", type=int, default=4)
+    parser.add_argument("--min-delta", type=float, default=0.0005)
     parser.add_argument("--checkpoint-every-batches", type=int, default=100)
+    parser.add_argument("--test-symmetries", type=int, choices=range(1, 9), default=8)
+    parser.add_argument("--test-cutoffs", nargs="+", type=int, default=(200, 250, 300))
+    parser.add_argument(
+        "--decode",
+        choices=("argmax", "expected", "median", "top3_expected"),
+        default="expected",
+    )
     parser.add_argument(
         "--evaluate-test",
         action=argparse.BooleanOptionalAction,

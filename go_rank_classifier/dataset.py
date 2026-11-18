@@ -59,12 +59,14 @@ class SGFGameDataset(Dataset):
         training: bool,
         seed: int = 0,
         limit: int | None = None,
+        fixed_cutoff: int | None = None,
     ) -> None:
         self.data = data
         self.training = training
         self.seed = seed
         self.size = len(data) if limit is None else min(len(data), limit)
         self.epoch = 0
+        self.fixed_cutoff = fixed_cutoff
 
     def __len__(self) -> int:
         return self.size
@@ -76,7 +78,10 @@ class SGFGameDataset(Dataset):
     def augmentation_for(self, index: int) -> tuple[int, int]:
         length = int(self.data.lengths[index])
         if not self.training:
-            return min(300, length), 0
+            cutoff = min(self.fixed_cutoff or 300, length)
+            if cutoff < 100:
+                raise ValueError(f"Game {index} is shorter than 100 moves")
+            return cutoff, 0
         mixed_seed = (
             self.seed * 1_000_003
             + self.epoch * 97_409
