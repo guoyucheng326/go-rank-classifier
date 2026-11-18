@@ -77,12 +77,21 @@ for key in ("data", "output", "epochs", "batch_size", "workers", "lr", "schedule
 
 lines += ["", "## 逐轮结果", ""]
 if rows:
+    def fmt(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return value
+        if number == int(number) and abs(number) < 1_000_000:
+            return str(int(number))
+        return f"{number:.6f}".rstrip("0").rstrip(".")
+
     header = ["epoch", "train_loss", "val_accuracy", "val_top3_accuracy", "lr", "seconds", "partial", "stop_reason"]
     header = [name for name in header if name in rows[0]]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("| " + " | ".join("---" for _ in header) + " |")
     for row in rows:
-        lines.append("| " + " | ".join(row.get(name, "") for name in header) + " |")
+        lines.append("| " + " | ".join(fmt(row.get(name, "")) for name in header) + " |")
     total = sum(float(row.get("seconds", 0) or 0) for row in rows)
     lines += ["", f"- 本次记录 {len(rows)} 轮，合计 {total:.1f} s（{total / 3600:.2f} h）"]
     best = max(rows, key=lambda row: float(row.get("val_accuracy", 0) or 0))
