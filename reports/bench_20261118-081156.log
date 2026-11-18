@@ -1,0 +1,170 @@
+# go_ranker pipeline / throughput investigation, 2026-11-18 08:01-08:10
+# host: RTX 5080 (compute 12.0, 16 GB), 24 vCPU, 15 GB RAM, NVMe ext4, driver 580.119.02
+
+================================================================
+## shuffle_data retrofit on the existing cache (logs/shuffle_data.log)
+================================================================
+test: shuffled 393,216/922,598
+test: shuffled 524,288/922,598
+test: shuffled 655,360/922,598
+test: shuffled 786,432/922,598
+test: shuffled 917,504/922,598
+test: shuffled 922,598/922,598
+-rw-rw-r-- 1 amax amax 35 11月 18 08:02 data/prepared/test.shuffled
+-rw-rw-r-- 1 amax amax 37 11月 18 08:01 data/prepared/train.shuffled
+-rw-rw-r-- 1 amax amax 35 11月 18 08:02 data/prepared/val.shuffled
+seed=2027
+count=7380669
+seconds=11.1
+
+================================================================
+## pytest tests -q (after pulling 207eb07)
+================================================================
+............                                                             [100%]
+12 passed in 0.58s
+
+================================================================
+## smoke: 2048 train / 256 val / 512 test samples, new auto test-evaluation
+================================================================
+{"epoch": 1, "train_loss": 3.4030656218528748, "val_accuracy": 0.09765625, "val_top3_accuracy": 0.34765625, "lr": 2e-05, "seconds": 1.1, "partial": false, "stop_reason": ""}
+{"test_accuracy": 0.119140625, "test_top3_accuracy": 0.330078125, "test_macro_f1": 0.008189018660222848, "test_adjacent_accuracy": 0.271484375}
+
+================================================================
+## train.py probe, baseline limiter (204800 train samples, workers=12, bs=512)
+================================================================
+{"epoch": 1, "batch": 100, "batches": 400, "loss": 3.379610090255737, "elapsed_seconds": 5.6}
+{"epoch": 1, "batch": 200, "batches": 400, "loss": 3.3741160345077517, "elapsed_seconds": 10.1}
+{"epoch": 1, "batch": 300, "batches": 400, "loss": 3.369242440064748, "elapsed_seconds": 14.5}
+{"epoch": 1, "batch": 400, "batches": 400, "loss": 3.356008694767952, "elapsed_seconds": 18.5}
+{"epoch": 1, "train_loss": 3.356008694767952, "val_accuracy": 0.1171875, "val_top3_accuracy": 0.359375, "lr": 2e-05, "seconds": 18.8, "partial": false, "stop_reason": ""}
+
+================================================================
+## train.py probe, bs=1024
+================================================================
+{"epoch": 1, "batch": 100, "batches": 200, "loss": 3.3740147376060485, "elapsed_seconds": 10.4}
+{"epoch": 1, "batch": 200, "batches": 200, "loss": 3.3639371895790102, "elapsed_seconds": 18.4}
+{"epoch": 1, "train_loss": 3.3639371895790102, "val_accuracy": 0.125, "val_top3_accuracy": 0.3828125, "lr": 2e-05, "seconds": 18.7, "partial": false, "stop_reason": ""}
+
+================================================================
+## train.py probe, bs=2048
+================================================================
+{"epoch": 1, "batch": 100, "batches": 100, "loss": 3.372884747982025, "elapsed_seconds": 18.2}
+{"epoch": 1, "train_loss": 3.372884747982025, "val_accuracy": 0.1015625, "val_top3_accuracy": 0.390625, "lr": 2e-05, "seconds": 18.5, "partial": false, "stop_reason": ""}
+
+================================================================
+## train.py probe, --checkpoint-every-batches 0 (rules out checkpoint I/O)
+================================================================
+{"epoch": 1, "train_loss": 3.356008694767952, "val_accuracy": 0.1171875, "val_top3_accuracy": 0.359375, "lr": 2e-05, "seconds": 18.6, "partial": false, "stop_reason": ""}
+
+================================================================
+## bench_loader.py: DataLoader throughput matrix (limit=204800, bs=512)
+================================================================
+workers= 0 pin=False:   33.7 ms/batch    15196 samples/s
+workers= 0 pin=True :   45.3 ms/batch    11297 samples/s
+workers= 1 pin=False:   40.9 ms/batch    12525 samples/s
+workers= 1 pin=True :   41.7 ms/batch    12285 samples/s
+workers= 4 pin=False:   10.7 ms/batch    47998 samples/s
+workers= 4 pin=True :   10.4 ms/batch    49128 samples/s
+workers=12 pin=False:    4.7 ms/batch   109851 samples/s
+workers=12 pin=True :    6.2 ms/batch    82273 samples/s
+
+================================================================
+## bench_limit.py: repeatability, 3 rounds x 2 limits (workers=12, pin=True)
+================================================================
+round=0 limit= 61440:    5.5 ms/batch    93724 samples/s
+round=0 limit=204800:    5.4 ms/batch    94845 samples/s
+round=1 limit= 61440:    6.4 ms/batch    79473 samples/s
+round=1 limit=204800:    6.1 ms/batch    84223 samples/s
+round=2 limit= 61440:    5.2 ms/batch    97612 samples/s
+round=2 limit=204800:    5.0 ms/batch   101406 samples/s
+--- second run, 3 minutes later:
+round=0 limit= 61440:    5.7 ms/batch    90511 samples/s
+round=0 limit=204800:    4.9 ms/batch   104318 samples/s
+round=1 limit= 61440:    5.1 ms/batch    99654 samples/s
+round=1 limit=204800:    5.9 ms/batch    86847 samples/s
+round=2 limit= 61440:    6.6 ms/batch    77800 samples/s
+round=2 limit=204800:    5.0 ms/batch   101627 samples/s
+
+================================================================
+## bench_loop.py: synthetic vs real loop, per-step GPU sync on/off
+================================================================
+synthetic, no per-step sync:   14.8 ms/batch     34704 samples/s
+synthetic, per-step sync   :   14.9 ms/batch     34476 samples/s
+real loader, no per-step sync:   16.1 ms/batch     31729 samples/s
+real loader, per-step sync   :   15.3 ms/batch     33435 samples/s
+
+================================================================
+## bench_loss.py: A/B over criterion variants (round 0/1, same loader)
+================================================================
+round=0 plain CE                :   15.2 ms/batch    33601 samples/s
+round=0 weighted CE             :   33.3 ms/batch    15358 samples/s
+round=0 CE + smoothing          :   15.4 ms/batch    33289 samples/s
+round=0 weighted CE + smoothing :   16.3 ms/batch    31326 samples/s
+round=1 plain CE                :   34.0 ms/batch    15067 samples/s
+round=1 weighted CE             :   35.1 ms/batch    14603 samples/s
+round=1 CE + smoothing          :   31.6 ms/batch    16186 samples/s
+round=1 weighted CE + smoothing :   33.4 ms/batch    15332 samples/s
+
+================================================================
+## bench_loss2.py: nn.CrossEntropyLoss(weight) vs manual equivalent, numeric check
+================================================================
+reference 6.62442255  manual 6.62770462
+round=0 nn.CrossEntropyLoss(weight) :   15.8 ms/batch    32327 samples/s
+round=0 manual weighted CE          :   30.4 ms/batch    16844 samples/s
+round=1 nn.CrossEntropyLoss(weight) :   23.9 ms/batch    21459 samples/s
+round=1 manual weighted CE          :   34.5 ms/batch    14841 samples/s
+
+================================================================
+## bench_stage.py: incremental pipeline stages (kept for reference; noisy)
+================================================================
+1 load                      :   41.8 ms/batch    12246 samples/s
+2 load + h2d                :   26.7 ms/batch    19166 samples/s
+3 + forward + loss          :    5.8 ms/batch    88698 samples/s
+4 + backward (no step)      :   34.0 ms/batch    15071 samples/s
+5 + full step               :   35.2 ms/batch    14554 samples/s
+
+================================================================
+## bench_amp.py: AMP strategy comparison (workers=12, bs=512, 30 steps)
+================================================================
+fp16 + GradScaler (current)       :   38.7 ms/batch    13216 samples/s   0.0000
+bf16, no scaler, per-step float() :   40.3 ms/batch    12709 samples/s   0.0000
+bf16, no scaler, tensor loss sum  :   34.8 ms/batch    14695 samples/s   3.3808
+fp32 (no autocast), tensor loss sum:   37.7 ms/batch    13592 samples/s   3.3807
+
+================================================================
+## bench_pcie.py: host-to-device bandwidth for one batch of features (16.3 MB)
+================================================================
+H2D pinned   :   0.39 ms for 16.3 MB ->  41.95 GB/s
+H2D pageable :   0.96 ms for 16.3 MB ->  16.92 GB/s
+
+================================================================
+## bench_profile.py: torch.profiler, 20 steps (top self-CPU ops per step)
+================================================================
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+enumerate(DataLoader)#_MultiProcessingDataLoaderIter...         0.18%     552.899us         0.18%     552.899us      27.645us            20  
+                                               aten::to         0.56%       1.732ms         5.37%      16.727ms       8.448us          1980  
+                                         aten::_to_copy         0.99%       3.074ms         4.81%      14.994ms       8.925us          1680  
+                                    aten::empty_strided         1.44%       4.502ms         1.44%       4.502ms       1.631us          2760  
+                                            aten::copy_         3.36%      10.472ms         3.36%      10.472ms       5.398us          1940  
+                    Optimizer.zero_grad#AdamW.zero_grad         0.23%     701.902us         0.23%     701.902us      35.095us            20  
+                                           aten::conv2d         0.24%     737.320us         5.09%      15.881ms      36.093us           440  
+                                      aten::convolution         0.17%     534.713us         1.79%       5.592ms      25.418us           220  
+                                     aten::_convolution         0.17%     530.413us         1.62%       5.057ms      22.988us           220  
+                                aten::cudnn_convolution         1.45%       4.527ms         1.45%       4.527ms      20.577us           220  
+                                       aten::group_norm         0.20%     612.768us         4.73%      14.749ms      33.520us           440  
+--- sorted by self CPU (whole loop; 20 steps):
+
+================================================================
+## resume compatibility check: old checkpoint (no progress field) -> new code
+================================================================
+{"resumed_from": "runs/go_rank/last.pt", "start_epoch": 8, "start_batch": 0}
+{"epoch": 8, "train_loss": 2.6439966678619387, "val_accuracy": 0.21484375, "val_top3_accuracy": 0.5390625, "lr": 5.999999999999999e-06, "seconds": 1.8, "partial": false, "stop_reason": ""}
+{"test_accuracy": 0.20703125, "test_top3_accuracy": 0.55859375, "test_macro_f1": 0.1745265770175428, "test_adjacent_accuracy": 0.5234375}
+
+================================================================
+## storage sanity
+================================================================
+/dev/nvme0n1p3 ext4  923G   86G  799G  10% /
+dd if=train_moves.npy of=/dev/null bs=1M count=1024 iflag=direct -> 4.2 GB/s
