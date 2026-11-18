@@ -13,7 +13,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON="${PYTHON:-/opt/anaconda3/bin/python}"
-RUN_DIR="${RUN_DIR:-runs/go_rank}"
+RUN_DIR="${RUN_DIR:-runs/go_rank_v2}"
 TAG="${TAG:-$(date +%Y%m%d-%H%M%S)}"
 LOG_FILE="${LOG_FILE:-logs/latest.log}"
 BRANCH="${BRANCH:-main}"
@@ -38,7 +38,10 @@ copy_artifact() {
 copy_artifact history csv
 copy_artifact metrics json
 copy_artifact test_metrics json
-copy_artifact test_metrics_per_class csv
+copy_artifact test_black_metrics json
+copy_artifact test_black_metrics_per_class csv
+copy_artifact test_white_metrics json
+copy_artifact test_white_metrics_per_class csv
 
 "$PYTHON" - "$TAG" "$RUN_DIR" <<'PY'
 import csv
@@ -94,10 +97,17 @@ if rows:
         lines.append("| " + " | ".join(fmt(row.get(name, "")) for name in header) + " |")
     total = sum(float(row.get("seconds", 0) or 0) for row in rows)
     lines += ["", f"- 本次记录 {len(rows)} 轮，合计 {total:.1f} s（{total / 3600:.2f} h）"]
-    best = max(rows, key=lambda row: float(row.get("val_accuracy", 0) or 0))
+    best = max(
+        rows,
+        key=lambda row: (
+            float(row.get("black_accuracy", 0) or 0)
+            + float(row.get("white_accuracy", 0) or 0)
+        )
+        / 2,
+    )
     lines.append(
-        f"- 本次最佳：epoch {best['epoch']}，val_acc {best['val_accuracy']}，"
-        f"val_top3 {best.get('val_top3_accuracy', 'n/a')}"
+        f"- 本次最佳：epoch {best['epoch']}，black_acc {best.get('black_accuracy', 'n/a')}，"
+        f"white_acc {best.get('white_accuracy', 'n/a')}"
     )
 else:
     lines.append("（没有 history.csv）")
@@ -114,7 +124,7 @@ if test_path.exists():
     lines += ["", "逐类指标见 `test_metrics_per_class_" + tag + ".csv`。"]
 
 lines += ["", "## 继续训练", "", "```bash",
-          "EPOCHS=60 MAX_SECONDS=28800 scripts/train_daily.sh",
+          "EPOCHS=12 MAX_SECONDS=28800 scripts/train_daily.sh",
           "```", ""]
 (Path("reports") / f"README_{tag}.md").write_text("\n".join(lines), encoding="utf-8")
 print(f"report: wrote reports/README_{tag}.md")

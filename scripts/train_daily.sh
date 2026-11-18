@@ -6,10 +6,10 @@ cd "$ROOT_DIR"
 
 PYTHON="${PYTHON:-/opt/anaconda3/bin/python}"
 DATASET_ARCHIVES="${DATASET_ARCHIVES:-/home/amax/datasets/go-dataset}"
-DATA_DIR="${DATA_DIR:-data/prepared}"
+DATA_DIR="${DATA_DIR:-data/prepared_v2}"
+KATAGO_DATA="${KATAGO_DATA:-data/katago_v1}"
 RUN_DIR="${RUN_DIR:-runs/go_rank_v2}"
 RESUME_FROM="${RESUME_FROM:-}"
-PER_CLASS="${PER_CLASS:-0}"
 INITIAL_EPOCHS="${INITIAL_EPOCHS:-12}"
 EPOCHS="${EPOCHS:-12}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
@@ -31,7 +31,7 @@ TEST_SYMMETRIES="${TEST_SYMMETRIES:-8}"
 TEST_CUTOFFS="${TEST_CUTOFFS:-200 250 300}"
 DECODE="${DECODE:-expected}"
 MAX_SECONDS="${MAX_SECONDS:-}"
-SHUFFLE_DATA="${SHUFFLE_DATA:-1}"
+USE_KATAGO="${USE_KATAGO:-1}"
 FORCE_PREPARE="${FORCE_PREPARE:-0}"
 
 mkdir -p "$RUN_DIR" logs
@@ -50,14 +50,17 @@ if [[ "$FORCE_PREPARE" == "1" || ! -f "$DATA_DIR/manifest.json" || ! -f "$DATA_D
   "$PYTHON" -m go_rank_classifier.prepare \
     --archive-root "$DATASET_ARCHIVES" \
     --output "$DATA_DIR" \
-    --per-class "$PER_CLASS" \
     --workers 4
 fi
 
-if [[ "$SHUFFLE_DATA" == "1" && ! -f "$DATA_DIR/train.shuffled" ]]; then
-  "$PYTHON" -m go_rank_classifier.shuffle_data \
-    --data-dir "$DATA_DIR" \
-    --splits train val test
+KATAGO_ARGS=()
+if [[ "$USE_KATAGO" == "1" ]]; then
+  if [[ ! -f "$KATAGO_DATA/train_katago_black.npy" ]]; then
+    echo "Missing KataGo cache under $KATAGO_DATA" >&2
+    echo "Build it with scripts/build_katago_features.sh first." >&2
+    exit 2
+  fi
+  KATAGO_ARGS=(--katago-data "$KATAGO_DATA")
 fi
 
 RESUME_ARGS=()
@@ -82,6 +85,7 @@ read -r -a TEST_CUTOFF_ARGS <<< "$TEST_CUTOFFS"
 
 "$PYTHON" -m go_rank_classifier.train \
   --data "$DATA_DIR" \
+  "${KATAGO_ARGS[@]}" \
   --output "$RUN_DIR" \
   --epochs "$RUN_EPOCHS" \
   --batch-size "$BATCH_SIZE" \

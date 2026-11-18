@@ -11,7 +11,9 @@ from .dataset import load_split
 from .ranks import ID_TO_RANK
 
 
-def _split_hashes(path: Path, block_size: int) -> tuple[np.ndarray, np.ndarray]:
+def _split_hashes(
+    path: Path, block_size: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     split = load_split(path)
     hashes = np.empty(len(split), dtype=np.uint64)
     for start in range(0, len(split), block_size):
@@ -24,16 +26,19 @@ def _split_hashes(path: Path, block_size: int) -> tuple[np.ndarray, np.ndarray]:
             ).digest()
             hashes[offset] = int.from_bytes(digest, "little")
         print(f"{path.name}: hashed {stop:,}/{len(split):,}", flush=True)
-    return hashes, np.asarray(split.labels)
+    return hashes, np.asarray(split.black_labels), np.asarray(split.white_labels)
 
 
 def audit(data_dir: str | Path, block_size: int = 131_072) -> dict:
     data_dir = Path(data_dir)
     split_names = ("train", "val", "test")
     hashes: dict[str, np.ndarray] = {}
-    labels: dict[str, np.ndarray] = {}
+    black_labels: dict[str, np.ndarray] = {}
+    white_labels: dict[str, np.ndarray] = {}
     for split in split_names:
-        hashes[split], labels[split] = _split_hashes(data_dir / split, block_size)
+        hashes[split], black_labels[split], white_labels[split] = _split_hashes(
+            data_dir / split, block_size
+        )
 
     report: dict = {"splits": {}, "cross_split_duplicates": {}}
     for split in split_names:
@@ -54,7 +59,11 @@ def audit(data_dir: str | Path, block_size: int = 131_072) -> dict:
             )
 
     combined_hashes = np.concatenate([hashes[split] for split in split_names])
-    combined_labels = np.concatenate([labels[split] for split in split_names])
+    combined_black = np.concatenate([black_labels[split] for split in split_names])
+    combined_white = np.concatenate([white_labels[split] for split in split_names])
+    combined_labels = (
+        combined_black.astype(np.int32) * len(ID_TO_RANK) + combined_white
+    )
     order = np.argsort(combined_hashes, kind="stable")
     sorted_hashes = combined_hashes[order]
     starts = np.r_[

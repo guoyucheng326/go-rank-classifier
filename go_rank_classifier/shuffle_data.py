@@ -11,50 +11,63 @@ import numpy as np
 def shuffle_split(prefix: Path, seed: int, block_size: int) -> None:
     moves_path = prefix.with_name(f"{prefix.name}_moves.npy")
     lengths_path = prefix.with_name(f"{prefix.name}_lengths.npy")
-    labels_path = prefix.with_name(f"{prefix.name}_labels.npy")
     marker_path = prefix.with_name(f"{prefix.name}.shuffled")
-    if not all(path.is_file() for path in (moves_path, lengths_path, labels_path)):
+    optional_paths = [
+        prefix.with_name(f"{prefix.name}_{name}.npy")
+        for name in ("black_labels", "white_labels", "hashes")
+    ]
+    optional_paths = [path for path in optional_paths if path.is_file()]
+    if not all(path.is_file() for path in (moves_path, lengths_path)):
         raise FileNotFoundError(f"Missing prepared arrays for {prefix}")
 
     moves = np.load(moves_path, mmap_mode="r", allow_pickle=False)
     lengths = np.load(lengths_path, mmap_mode="r", allow_pickle=False)
-    labels = np.load(labels_path, mmap_mode="r", allow_pickle=False)
-    count = len(labels)
-    if len(moves) != count or len(lengths) != count:
+    optionals = {
+        path: np.load(path, mmap_mode="r", allow_pickle=False)
+        for path in optional_paths
+    }
+    count = len(lengths)
+    if len(moves) != count or any(len(array) != count for array in optionals.values()):
         raise ValueError(f"Prepared arrays have inconsistent sizes for {prefix}")
 
     permutation = np.random.default_rng(seed).permutation(count)
+    sources = {
+        moves_path: moves,
+        lengths_path: lengths,
+        **optionals,
+    }
     temporary = {
-        name: prefix.with_name(f".{prefix.name}_{name}.shuffle-tmp.npy")
-        for name in ("moves", "lengths", "labels")
+        path: path.with_name(f".{path.name}.shuffle-tmp.npy")
+        for path in sources
     }
     destination_moves = np.lib.format.open_memmap(
-        temporary["moves"], mode="w+", dtype=moves.dtype, shape=moves.shape
+        temporary[moves_path], mode="w+", dtype=moves.dtype, shape=moves.shape
     )
-    destination_lengths = np.lib.format.open_memmap(
-        temporary["lengths"], mode="w+", dtype=lengths.dtype, shape=lengths.shape
-    )
-    destination_labels = np.lib.format.open_memmap(
-        temporary["labels"], mode="w+", dtype=labels.dtype, shape=labels.shape
-    )
+    destinations = {
+        path: np.lib.format.open_memmap(
+            temporary[path], mode="w+", dtype=array.dtype, shape=array.shape
+        )
+        for path, array in sources.items()
+    }
 
     started = time.time()
     for start in range(0, count, block_size):
         indices = permutation[start : start + block_size]
+        destination_moves = destinations[moves_path]
         destination_moves[start : start + len(indices)] = moves[indices]
-        destination_lengths[start : start + len(indices)] = lengths[indices]
-        destination_labels[start : start + len(indices)] = labels[indices]
+        destinations[lengths_path][start : start + len(indices)] = lengths[indices]
+        for path, source in optionals.items():
+            destinations[path][start : start + len(indices)] = source[indices]
         print(
             f"{prefix.name}: shuffled {start + len(indices):,}/{count:,}",
             flush=True,
         )
-    for array in (destination_moves, destination_lengths, destination_labels):
+    for array in destinations.values():
         array.flush()
-    del destination_moves, destination_lengths, destination_labels
+    del destination_moves, destinations
 
-    os.replace(temporary["moves"], moves_path)
-    os.replace(temporary["lengths"], lengths_path)
-    os.replace(temporary["labels"], labels_path)
+    for path in sources:
+        os.replace(temporary[path], path)
     marker_path.write_text(
         f"seed={seed}\ncount={count}\nseconds={time.time() - started:.1f}\n",
         encoding="utf-8",

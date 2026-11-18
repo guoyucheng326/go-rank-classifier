@@ -1,259 +1,227 @@
 # Go Rank Classifier
 
-Classify a Go game record (SGF) into one of 28 Fox server rank IDs using only
-the moves in the game.
+Train a dual-player Go rank classifier from SGF records. One SGF contains
+separate black and white rank labels, so the model has two 28-class heads. To
+return one rank ID for a game, select the player being evaluated.
 
-The model is trained on
-[featurecat/go-dataset](https://github.com/featurecat/go-dataset), which contains
-games from ranks `Pro`, `9d` through `1d`, and `1k` through `18k`.
+The model predicts:
+
+- black and white integer rank IDs
+- black and white continuous strength estimates
+- per-class probability distributions and confidence
+
+`Pro` is mapped to continuous `10d`. It remains one class, so the task still has
+28 classes:
+
+| ID | Rank | Strength |
+|---:|---|---:|
+| 0 | Pro | 10 |
+| 1 | 9d | 9 |
+| 2 | 8d | 8 |
+| ... | ... | ... |
+| 9 | 1d | 1 |
+| 10 | 1k | 0 |
+| 11 | 2k | -1 |
+| ... | ... | ... |
+| 27 | 18k | -17 |
 
 ## Data policy
 
-- Only SGF games whose main line contains 100 through 350 moves are retained.
-- Every retained game is truncated to its first 300 moves.
-- Games below 100 moves or above 350 moves are discarded.
-- SGF metadata such as player names and stated rank is never used as a feature.
-- Training applies one of the eight board symmetries uniformly at random:
-  identity, 90/180/270 degree rotations, and their mirror images.
-- Training also samples a random cutoff from move 100 through the game's stored
-  end (at most move 300). Validation and test use `min(game_length, 300)`.
+- Keep games whose SGF main line has 100 through 350 moves.
+- Truncate model input to the first 300 moves.
+- Require valid and recognizable SGF `BR` and `WR` values.
+- Require `HA[0]` and no `AB`/`AW` setup stones.
+- Reject non-19x19 games.
+- Deduplicate exact main-line move sequences before splitting.
+- Split by game after deduplication.
 
-## Rank IDs
+`BR` and `WR` are used only as labels. They are never model inputs.
 
-The output ID is based on the official Fox rank ordering:
-
-| ID | Rank | ID | Rank | ID | Rank | ID | Rank |
-|---:|---|---:|---|---:|---|---:|---|
-| 0 | Pro | 1 | 9d | 2 | 8d | 3 | 7d |
-| 4 | 6d | 5 | 5d | 6 | 4d | 7 | 3d |
-| 8 | 2d | 9 | 1d | 10 | 1k | 11 | 2k |
-| 12 | 3k | 13 | 4k | 14 | 5k | 15 | 6k |
-| 16 | 7k | 17 | 8k | 18 | 9k | 19 | 10k |
-| 20 | 11k | 21 | 12k | 22 | 13k | 23 | 14k |
-| 24 | 15k | 25 | 16k | 26 | 17k | 27 | 18k |
-
-## Installation
-
-Python 3.10+ and PyTorch are required. The preprocessing script also requires
-the `7z` command.
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-## Prepare the training data
-
-Point `--archive-root` at the downloaded `go-dataset` repository. Archives are
-streamed through `7z`, so the expander does not create tens of millions of
-intermediate SGF files.
+## Prepare SGF data
 
 ```bash
 python -m go_rank_classifier.prepare \
   --archive-root /home/amax/datasets/go-dataset \
-  --output data/prepared \
-  --per-class 0 \
+  --output data/prepared_v2 \
   --workers 4
 ```
 
-`--per-class 0` keeps every game that passes the main-line length and board-size
-filters. Small ranks such as `Pro`, `8d`, and `9d` therefore use all of their
-available records, while larger ranks contribute more data. Set a positive
-cap only when a smaller experiment is desired.
-
-Prepared moves are stored as memory-mapped `.npy` arrays. This avoids loading
-the full corpus into RAM during a daily training run.
-
-The output contains:
+The output contains memory-mapped dual-label data:
 
 ```text
-data/prepared/
-  train_moves.npy
-  train_lengths.npy
-  train_labels.npy
-  val_*.npy
-  test_*.npy
-  train.shuffled
-  val.shuffled
-  test.shuffled
-  labels.json
-  manifest.json
+train_moves.npy
+train_lengths.npy
+train_black_labels.npy
+train_white_labels.npy
+train_hashes.npy
+...same files for val and test...
+manifest.json
 ```
 
-Each game is stored as a compact sequence of board coordinates. CNN board
-features are built on demand, which keeps the prepared dataset relatively small.
+The manifest records the data fingerprint and separate black/white class
+counts.
 
-Prepare converts the grouped cache into a globally shuffled, memory-mapped
-cache. This allows training to read batches almost sequentially instead of
-causing one random disk read per game. To retrofit an existing cache without
-re-reading the source archives:
+## Build KataGo features
+
+Set the paths to the exact Transformer KataGo binary, model, and analysis
+configuration used on the RTX 5080:
 
 ```bash
-python -m go_rank_classifier.shuffle_data --data-dir data/prepared
+export KATAGO_BIN=/path/to/katago
+export KATAGO_MODEL=/path/to/transformer-model.bin.gz
+export KATAGO_CONFIG=/path/to/analysis.cfg
+
+DATA_DIR=data/prepared_v2 \
+OUTPUT_DIR=data/katago_v1 \
+MAX_VISITS=500 \
+POSITIONS_PER_PLAYER=0 \
+GAMES_PER_CLASS=0 \
+JOB_SIZE=500 \
+scripts/build_katago_features.sh
 ```
+
+The current RTX 5080 environment defaults to:
+
+```text
+KataGo v1.17.1 (git 5246793f)
+binary: /home/amax/guojianren/.tools/katago-opencl/katago
+model:  /home/amax/guojianren/.tools/katago-models/current-transformer.bin.gz
+config: /home/amax/guojianren/.tools/katago-opencl/analysis_config.cfg
+```
+
+The generated manifest records SHA256 hashes for all three files.
+
+`POSITIONS_PER_PLAYER=0` analyzes every move for both players.
+`GAMES_PER_CLASS=0` analyzes every game.
+
+The fixed analysis defaults are:
+
+```text
+rules       = chinese
+komi        = 7.5
+maxVisits   = 500
+ownership   = disabled
+PV length   = 15
+perspective = side to move
+```
+
+The executable, model, and configuration SHA256 values are recorded in each
+feature manifest.
+
+For a pilot, use:
+
+```bash
+GAMES_PER_CLASS=500 POSITIONS_PER_PLAYER=8 scripts/build_katago_features.sh
+```
+
+The generator saves:
+
+- compact per-move metrics in sharded `.npz` files
+- separate black/white aggregated feature matrices
+- a mask identifying games with complete requested analysis
+- feature names and fixed engine metadata
+
+The aggregated features include:
+
+- Top-1/Top-3/Top-5 recommendation agreement
+- played-move candidate rank
+- visit-weighted recommendation agreement
+- winrate loss and score-lead loss
+- blunder and severe-blunder rates
+- policy entropy
+- layout, middle-game, and late-game summaries
+
+Training never invokes KataGo. It reads the cached feature matrices.
 
 ## Train
 
 ```bash
-python -m go_rank_classifier.train \
-  --data data/prepared \
-  --output runs/go_rank \
-  --epochs 20 \
-  --batch-size 512 \
-  --workers 12
-```
-
-The best checkpoint is saved as `runs/go_rank/best.pt`. `history.csv` and
-`metrics.json` contain the training and evaluation results.
-
-After a normal run, the best checkpoint is evaluated automatically on the test
-split. `test_metrics.json`, `test_metrics_per_class.csv`, and
-`test_metrics_confusion.npy` contain overall, per-rank, and confusion-matrix
-results.
-
-The default `--class-weight-power 0.5` partially compensates for uneven class
-counts without throwing away games from large ranks. Set it to `0` for a
-natural-frequency loss, or `1` for fully inverse-frequency weighting.
-
-Resume from the latest checkpoint after an interruption or for a daily
-training run:
-
-```bash
-python -m go_rank_classifier.train \
-  --data data/prepared \
-  --output runs/go_rank \
-  --epochs 5 \
-  --resume runs/go_rank/last.pt
-```
-
-### Daily training command
-
-`scripts/train_daily.sh` prepares the cache when it is missing, resumes from
-`last.pt` when available, and writes a timestamped log. It uses a fixed
-learning rate by default so a one-epoch daily schedule does not collapse to the
-cosine scheduler's minimum learning rate.
-
-```bash
-chmod +x scripts/train_daily.sh
 scripts/train_daily.sh
 ```
 
-Useful environment variables:
+The model uses:
+
+- shared 96/192/384-channel CNN
+- independent black and white 28-class heads
+- optional 128-dimensional KataGo feature branch
+- distance-aware ordinal soft labels
+- class weighting `power=0.75`
+- warmup plus cosine learning-rate decay
+- Macro-F1/adjacent/composite early stopping
+- midepoch checkpoint recovery
+
+Default paths:
 
 | Variable | Default |
 |---|---|
-| `PYTHON` | `/opt/anaconda3/bin/python` |
-| `DATASET_ARCHIVES` | `/home/amax/datasets/go-dataset` |
-| `DATA_DIR` | `data/prepared` |
-| `RUN_DIR` | `runs/go_rank` |
-| `PER_CLASS` | `0` (all accepted games) |
-| `INITIAL_EPOCHS` | `5` |
-| `EPOCHS` | `1` |
-| `BATCH_SIZE` | `512` |
-| `WORKERS` | `12` |
-| `LEARNING_RATE` | `0.001` for a new run |
-| `RESUME_LR` | `0.0003` for resumed runs |
-| `CLASS_WEIGHT_POWER` | `0.5` |
-| `SCHEDULER` | `fixed` |
-| `MAX_SECONDS` | unset |
-| `SHUFFLE_DATA` | `1` |
-| `FORCE_PREPARE` | `0` |
+| `DATA_DIR` | `data/prepared_v2` |
+| `KATAGO_DATA` | `data/katago_v1` |
+| `RUN_DIR` | `runs/go_rank_v2` |
+| `MAX_VISITS` | `500` |
+| `CLASS_WEIGHT_POWER` | `0.75` |
+| `INITIAL_EPOCHS` | `12` |
+| `EPOCHS` | `12` |
+| `TEST_SYMMETRIES` | `8` |
+| `TEST_CUTOFFS` | `200 250 300` |
+| `DECODE` | `expected` |
 
-On the first run the script trains `INITIAL_EPOCHS`. Subsequent daily runs
-resume from `last.pt` and train `EPOCHS` more epochs. Example crontab entry:
-
-```cron
-15 2 * * * cd /path/to/go_ranker && scripts/train_daily.sh
-```
-
-If `MAX_SECONDS` or `--max-seconds` stops an epoch partway through, `last.pt`
-stores the exact batch offset. The next run resumes that epoch and its sampler
-order rather than skipping the unprocessed samples.
-
-The daily script uses a lock file to prevent overlapping training jobs. Do not
-run `shuffle_data` while another training process is using the cache.
-
-`SIGTERM` and `SIGINT` are handled after the current batch so the model,
-optimizer, and batch progress are saved before exit.
-
-For a quick smoke test:
+To resume an existing model into a new experiment directory:
 
 ```bash
-python -m go_rank_classifier.train \
-  --data data/prepared \
-  --output runs/smoke \
-  --epochs 1 \
-  --limit-train 2048 \
-  --limit-val 512
+RUN_DIR=runs/go_rank_v2 \
+RESUME_FROM=runs/go_rank/best.pt \
+scripts/train_daily.sh
 ```
 
-## Predict
+Because the model architecture and label definition changed, old 2.08M
+single-head checkpoints are not directly compatible with the dual-head model.
 
-Print only the numeric rank ID:
-
-```bash
-python -m go_rank_classifier.predict \
-  --checkpoint runs/go_rank/best.pt \
-  game.sgf
-```
-
-Print JSON with the rank name and class probabilities:
-
-```bash
-python -m go_rank_classifier.predict \
-  --checkpoint runs/go_rank/best.pt \
-  --json \
-  game.sgf
-```
-
-Python API:
-
-```python
-from go_rank_classifier.predict import RankPredictor
-
-predictor = RankPredictor("runs/go_rank/best.pt")
-rank_id, rank_name = predictor.predict_file("game.sgf")
-print(rank_id, rank_name)
-```
-
-## Evaluate and audit
-
-Evaluate a checkpoint and write overall metrics, per-rank metrics, and the
-confusion matrix:
+## Evaluation
 
 ```bash
 python -m go_rank_classifier.evaluate \
-  --checkpoint runs/go_rank/best.pt \
-  --data data/prepared \
-  --split test
+  --checkpoint runs/go_rank_v2/best.pt \
+  --data data/prepared_v2 \
+  --katago-data data/katago_v1 \
+  --split test \
+  --symmetries 8 \
+  --cutoffs 200 250 300 \
+  --decode expected
 ```
 
-Audit exact duplicate main-line move sequences across train, validation, and
-test:
+Reports include:
+
+- black/white Top-1 and Top-3
+- Macro-F1
+- expected-strength MAE/RMSE
+- `+-0.5` and `+-1.0` rank accuracy
+- per-class precision/recall/F1
+- confusion matrices
+
+## Predict one player
+
+```bash
+python -m go_rank_classifier.predict \
+  --checkpoint runs/go_rank_v2/best.pt \
+  --player white \
+  --katago-black black_features.npy \
+  --katago-white white_features.npy \
+  game.sgf
+```
+
+The two feature files each contain one row of features for the corresponding
+player. `--player` is required because one SGF has two different rank targets.
+
+## Duplicate audit
 
 ```bash
 python -m go_rank_classifier.audit \
-  --data-dir data/prepared \
+  --data-dir data/prepared_v2 \
   --output reports/duplicate_audit.json
 ```
-
-The audit reports duplicate rows within each split, cross-split overlap, and
-duplicate move sequences assigned to different ranks.
-
-## Input representation
-
-For each selected cutoff, the model receives a `22 x 19 x 19` tensor:
-
-- Black/white stones accumulated over the whole game (`2` channels).
-- Black/white stones played in the segment from move 100 to the cutoff (`2`).
-- Black/white stones in the last 32 moves (`2`).
-- One-hot black/white positions for each of the last eight moves (`16`).
-
-The SGF main line is parsed directly. Variations are ignored, pass moves are
-counted but do not add a board plane, and non-19x19 games are rejected.
 
 ## Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
-

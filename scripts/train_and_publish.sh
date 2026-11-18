@@ -10,10 +10,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 export MAX_SECONDS="${MAX_SECONDS:-28800}"
-export EPOCHS="${EPOCHS:-60}"
-export SHUFFLE_DATA="${SHUFFLE_DATA:-1}"
-export RESUME_LR="${RESUME_LR:-0.0003}"
-export SCHEDULER="${SCHEDULER:-fixed}"
+export EPOCHS="${EPOCHS:-12}"
+export RESUME_LR="${RESUME_LR:-0.0002}"
+export SCHEDULER="${SCHEDULER:-cosine}"
+export CLASS_WEIGHT_POWER="${CLASS_WEIGHT_POWER:-0.75}"
+export USE_KATAGO="${USE_KATAGO:-1}"
 
 echo "[train_and_publish] start $(date -Is) max_seconds=$MAX_SECONDS epochs=$EPOCHS"
 scripts/train_daily.sh

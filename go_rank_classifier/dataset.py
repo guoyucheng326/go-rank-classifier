@@ -15,11 +15,43 @@ from .features import board_features, transform_moves
 class SplitData:
     moves: np.ndarray
     lengths: np.ndarray
-    labels: np.ndarray
+    black_labels: np.ndarray
+    white_labels: np.ndarray
     shuffled: bool = False
 
     def __len__(self) -> int:
-        return int(self.labels.shape[0])
+        return int(self.black_labels.shape[0])
+
+
+@dataclass(frozen=True)
+class KataGoFeatureData:
+    black: np.ndarray
+    white: np.ndarray
+    mask: np.ndarray
+
+    def __len__(self) -> int:
+        return int(self.black.shape[0])
+
+    @staticmethod
+    def load(prefix: str | Path) -> "KataGoFeatureData":
+        prefix = Path(prefix)
+        black = np.load(
+            prefix.with_name(f"{prefix.name}_katago_black.npy"), mmap_mode="r"
+        )
+        white = np.load(
+            prefix.with_name(f"{prefix.name}_katago_white.npy"), mmap_mode="r"
+        )
+        mask_path = prefix.with_name(f"{prefix.name}_katago_mask.npy")
+        mask = (
+            np.load(mask_path, mmap_mode="r")
+            if mask_path.is_file()
+            else np.ones(black.shape[0], dtype=bool)
+        )
+        if black.shape[0] != white.shape[0]:
+            raise ValueError("Black and white KataGo feature counts differ")
+        if mask.shape[0] != black.shape[0]:
+            raise ValueError("KataGo mask does not match feature rows")
+        return KataGoFeatureData(black=black, white=white, mask=mask)
 
 
 def load_split(path: str | Path) -> SplitData:
@@ -29,14 +61,15 @@ def load_split(path: str | Path) -> SplitData:
             return SplitData(
                 moves=data["moves"],
                 lengths=data["lengths"],
-                labels=data["labels"],
+                black_labels=data["black_labels"],
+                white_labels=data["white_labels"],
                 shuffled=False,
             )
 
     prefix = requested.with_suffix("") if requested.suffix == ".npz" else requested
     files = {
         name: prefix.with_name(f"{prefix.name}_{name}.npy")
-        for name in ("moves", "lengths", "labels")
+        for name in ("moves", "lengths", "black_labels", "white_labels")
     }
     missing = [str(file) for file in files.values() if not file.is_file()]
     if missing:
@@ -44,7 +77,8 @@ def load_split(path: str | Path) -> SplitData:
     return SplitData(
         moves=np.load(files["moves"], mmap_mode="r", allow_pickle=False),
         lengths=np.load(files["lengths"], mmap_mode="r", allow_pickle=False),
-        labels=np.load(files["labels"], mmap_mode="r", allow_pickle=False),
+        black_labels=np.load(files["black_labels"], mmap_mode="r", allow_pickle=False),
+        white_labels=np.load(files["white_labels"], mmap_mode="r", allow_pickle=False),
         shuffled=prefix.with_name(f"{prefix.name}.shuffled").is_file(),
     )
 
@@ -60,6 +94,7 @@ class SGFGameDataset(Dataset):
         seed: int = 0,
         limit: int | None = None,
         fixed_cutoff: int | None = None,
+        katago: KataGoFeatureData | None = None,
     ) -> None:
         self.data = data
         self.training = training
@@ -67,6 +102,13 @@ class SGFGameDataset(Dataset):
         self.size = len(data) if limit is None else min(len(data), limit)
         self.epoch = 0
         self.fixed_cutoff = fixed_cutoff
+        self.katago = katago
+        self.indices = None
+        if katago is not None:
+            self.indices = np.flatnonzero(np.asarray(katago.mask))
+            self.size = min(self.size, len(self.indices))
+        if katago is not None and len(katago) != len(data):
+            raise ValueError("KataGo feature rows do not match the SGF split")
 
     def __len__(self) -> int:
         return self.size
@@ -92,15 +134,31 @@ class SGFGameDataset(Dataset):
         symmetry = rng.randrange(8)
         return cutoff, symmetry
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        length = int(self.data.lengths[index])
-        game_moves = self.data.moves[index, :length]
-        cutoff, symmetry = self.augmentation_for(index)
+    def __getitem__(self, index: int):
+        data_index = int(self.indices[index]) if self.indices is not None else index
+        length = int(self.data.lengths[data_index])
+        game_moves = self.data.moves[data_index, :length]
+        cutoff, symmetry = self.augmentation_for(data_index)
 
         game_moves = transform_moves(game_moves[:cutoff], symmetry)
         features = board_features(game_moves.tolist(), len(game_moves))
-        label = int(self.data.labels[index])
-        return torch.from_numpy(features), torch.tensor(label, dtype=torch.long)
+        black_label = torch.tensor(
+            int(self.data.black_labels[data_index]), dtype=torch.long
+        )
+        white_label = torch.tensor(
+            int(self.data.white_labels[data_index]), dtype=torch.long
+        )
+        if self.katago is None:
+            return torch.from_numpy(features), black_label, white_label
+        black = np.asarray(self.katago.black[data_index], dtype=np.float32)
+        white = np.asarray(self.katago.white[data_index], dtype=np.float32)
+        tabular = np.concatenate((black, white, black - white))
+        return (
+            torch.from_numpy(features),
+            torch.from_numpy(tabular),
+            black_label,
+            white_label,
+        )
 
 
 class DeterministicBatchSampler(Sampler[list[int]]):
