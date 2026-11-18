@@ -11,6 +11,7 @@ KATAGO_BIN="${KATAGO_BIN:-/home/amax/guojianren/.tools/katago-opencl/katago}"
 KATAGO_MODEL="${KATAGO_MODEL:-/home/amax/guojianren/.tools/katago-models/current-transformer.bin.gz}"
 KATAGO_CONFIG="${KATAGO_CONFIG:-/home/amax/guojianren/.tools/katago-opencl/analysis_config.cfg}"
 MAX_VISITS="${MAX_VISITS:-500}"
+CUTOFFS="${CUTOFFS:-100 150 200 250 300}"
 POSITIONS_PER_PLAYER="${POSITIONS_PER_PLAYER:-0}"
 GAMES_PER_CLASS="${GAMES_PER_CLASS:-0}"
 JOB_SIZE="${JOB_SIZE:-500}"
@@ -19,6 +20,7 @@ SEED="${SEED:-2029}"
 
 mkdir -p "$OUTPUT_DIR" logs
 read -r -a SPLIT_ARGS <<< "$SPLITS"
+read -r -a CUTOFF_ARGS <<< "$CUTOFFS"
 
 for split in "${SPLIT_ARGS[@]}"; do
   "$PYTHON" -m go_rank_classifier.katago_features \
@@ -31,6 +33,7 @@ for split in "${SPLIT_ARGS[@]}"; do
     --rules chinese \
     --komi 7.5 \
     --max-visits "$MAX_VISITS" \
+    --cutoffs "${CUTOFF_ARGS[@]}" \
     --positions-per-player "$POSITIONS_PER_PLAYER" \
     --games-per-class "$GAMES_PER_CLASS" \
     --job-size "$JOB_SIZE" \

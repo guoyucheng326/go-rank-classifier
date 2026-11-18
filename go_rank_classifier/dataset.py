@@ -18,6 +18,7 @@ class SplitData:
     black_labels: np.ndarray
     white_labels: np.ndarray
     shuffled: bool = False
+    hashes: np.ndarray | None = None
 
     def __len__(self) -> int:
         return int(self.black_labels.shape[0])
@@ -28,6 +29,8 @@ class KataGoFeatureData:
     black: np.ndarray
     white: np.ndarray
     mask: np.ndarray
+    cutoffs: tuple[int, ...]
+    hashes: np.ndarray | None = None
 
     def __len__(self) -> int:
         return int(self.black.shape[0])
@@ -41,6 +44,8 @@ class KataGoFeatureData:
         white = np.load(
             prefix.with_name(f"{prefix.name}_katago_white.npy"), mmap_mode="r"
         )
+        if black.ndim != 3 or white.ndim != 3:
+            raise ValueError("Expected KataGo feature arrays shaped (games, cutoffs, features)")
         mask_path = prefix.with_name(f"{prefix.name}_katago_mask.npy")
         mask = (
             np.load(mask_path, mmap_mode="r")
@@ -49,9 +54,33 @@ class KataGoFeatureData:
         )
         if black.shape[0] != white.shape[0]:
             raise ValueError("Black and white KataGo feature counts differ")
+        if black.shape[1:] != white.shape[1:]:
+            raise ValueError("Black and white KataGo feature shapes differ")
         if mask.shape[0] != black.shape[0]:
             raise ValueError("KataGo mask does not match feature rows")
-        return KataGoFeatureData(black=black, white=white, mask=mask)
+        cutoffs_path = prefix.with_name(f"{prefix.name}_katago_cutoffs.json")
+        if cutoffs_path.is_file():
+            import json
+
+            cutoffs = tuple(
+                int(value)
+                for value in json.loads(cutoffs_path.read_text(encoding="utf-8"))
+            )
+        else:
+            cutoffs = (100, 150, 200, 250, 300)[: black.shape[1]]
+        if len(cutoffs) != black.shape[1]:
+            raise ValueError("KataGo cutoff count does not match feature arrays")
+        hashes_path = prefix.with_name(f"{prefix.name}_katago_hashes.npy")
+        hashes = (
+            np.load(hashes_path, mmap_mode="r") if hashes_path.is_file() else None
+        )
+        return KataGoFeatureData(
+            black=black,
+            white=white,
+            mask=mask,
+            cutoffs=cutoffs,
+            hashes=hashes,
+        )
 
 
 def load_split(path: str | Path) -> SplitData:
@@ -64,6 +93,7 @@ def load_split(path: str | Path) -> SplitData:
                 black_labels=data["black_labels"],
                 white_labels=data["white_labels"],
                 shuffled=False,
+                hashes=data["hashes"] if "hashes" in data else None,
             )
 
     prefix = requested.with_suffix("") if requested.suffix == ".npz" else requested
@@ -71,6 +101,7 @@ def load_split(path: str | Path) -> SplitData:
         name: prefix.with_name(f"{prefix.name}_{name}.npy")
         for name in ("moves", "lengths", "black_labels", "white_labels")
     }
+    files["hashes"] = prefix.with_name(f"{prefix.name}_hashes.npy")
     missing = [str(file) for file in files.values() if not file.is_file()]
     if missing:
         raise FileNotFoundError(f"Missing prepared arrays: {', '.join(missing)}")
@@ -80,6 +111,11 @@ def load_split(path: str | Path) -> SplitData:
         black_labels=np.load(files["black_labels"], mmap_mode="r", allow_pickle=False),
         white_labels=np.load(files["white_labels"], mmap_mode="r", allow_pickle=False),
         shuffled=prefix.with_name(f"{prefix.name}.shuffled").is_file(),
+        hashes=(
+            np.load(files["hashes"], mmap_mode="r", allow_pickle=False)
+            if files["hashes"].is_file()
+            else None
+        ),
     )
 
 
@@ -109,6 +145,14 @@ class SGFGameDataset(Dataset):
             self.size = min(self.size, len(self.indices))
         if katago is not None and len(katago) != len(data):
             raise ValueError("KataGo feature rows do not match the SGF split")
+
+    def katago_bucket(self, cutoff: int) -> int:
+        if self.katago is None:
+            raise ValueError("No KataGo features are loaded")
+        eligible = [
+            index for index, value in enumerate(self.katago.cutoffs) if value <= cutoff
+        ]
+        return eligible[-1] if eligible else 0
 
     def __len__(self) -> int:
         return self.size
@@ -150,8 +194,13 @@ class SGFGameDataset(Dataset):
         )
         if self.katago is None:
             return torch.from_numpy(features), black_label, white_label
-        black = np.asarray(self.katago.black[data_index], dtype=np.float32)
-        white = np.asarray(self.katago.white[data_index], dtype=np.float32)
+        feature_index = self.katago_bucket(cutoff)
+        black = np.asarray(
+            self.katago.black[data_index, feature_index], dtype=np.float32
+        )
+        white = np.asarray(
+            self.katago.white[data_index, feature_index], dtype=np.float32
+        )
         tabular = np.concatenate((black, white, black - white))
         return (
             torch.from_numpy(features),

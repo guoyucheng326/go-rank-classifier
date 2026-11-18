@@ -63,6 +63,7 @@ def prepare_rank(
     black_labels: list[int] = []
     white_labels: list[int] = []
     hashes: list[int] = []
+    pair_hashes: list[int] = []
     seen_games = 0
     rejected_length = 0
     rejected_board = 0
@@ -100,6 +101,19 @@ def prepare_rank(
             white_labels.append(int(game.white_rank))
             digest = hashlib.blake2b(truncated.tobytes(), digest_size=8).digest()
             hashes.append(int.from_bytes(digest, "little"))
+            if game.black_name or game.white_name:
+                pair_key = (
+                    game.black_name.strip().casefold()
+                    + "\0"
+                    + game.white_name.strip().casefold()
+                ).encode("utf-8")
+            else:
+                pair_key = truncated.tobytes()
+            pair_hashes.append(
+                int.from_bytes(
+                    hashlib.blake2b(pair_key, digest_size=8).digest(), "little"
+                )
+            )
 
     shard = Path(shard_root) / rank
     shard.mkdir(parents=True, exist_ok=True)
@@ -111,6 +125,7 @@ def prepare_rank(
     np.save(shard / "black_labels.npy", np.asarray(black_labels, dtype=np.int16))
     np.save(shard / "white_labels.npy", np.asarray(white_labels, dtype=np.int16))
     np.save(shard / "hashes.npy", np.asarray(hashes, dtype=np.uint64))
+    np.save(shard / "pair_hashes.npy", np.asarray(pair_hashes, dtype=np.uint64))
 
     stats: dict[str, int | float] = {
         "seen_games": seen_games,
@@ -156,6 +171,9 @@ def _concat_rank_shards(
         "hashes": np.lib.format.open_memmap(
             output / "_all_hashes.npy", mode="w+", dtype=np.uint64, shape=(total,)
         ),
+        "pair_hashes": np.lib.format.open_memmap(
+            output / "_all_pair_hashes.npy", mode="w+", dtype=np.uint64, shape=(total,)
+        ),
     }
     cursor = 0
     for rank in ranks:
@@ -182,17 +200,48 @@ def _write_dual_splits(
     white = np.load(output / "_all_white_labels.npy", mmap_mode="r")
     hashes = np.load(output / "_all_hashes.npy", mmap_mode="r")
 
-    _, first_indices = np.unique(hashes, return_index=True)
-    first_indices.sort()
+    pair_hashes = np.load(output / "_all_pair_hashes.npy", mmap_mode="r")
+    label_codes = (
+        np.asarray(black).astype(np.int64) * len(RANKS) + np.asarray(white)
+    )
+    if len(hashes) == 0:
+        first_indices = np.empty(0, dtype=np.int64)
+        conflicting_groups = 0
+    else:
+        dedup_order = np.lexsort((label_codes, hashes))
+        sorted_hashes = hashes[dedup_order]
+        sorted_labels = label_codes[dedup_order]
+        starts = np.r_[0, np.flatnonzero(np.diff(sorted_hashes)) + 1]
+        ends = np.r_[starts[1:], len(sorted_hashes)]
+        consistent_groups = sorted_labels[starts] == sorted_labels[ends - 1]
+        conflicting_groups = int((~consistent_groups).sum())
+        first_indices = dedup_order[starts][consistent_groups]
+        first_indices.sort()
+
+    pair_values = np.asarray(pair_hashes[first_indices])
+    _, pair_groups = np.unique(pair_values, return_inverse=True)
     rng = np.random.default_rng(seed)
-    order = first_indices[rng.permutation(first_indices.size)]
-    train_end = int(order.size * 0.8)
-    val_end = int(order.size * 0.9)
-    portions = {
-        "train": order[:train_end],
-        "val": order[train_end:val_end],
-        "test": order[val_end:],
+    unique_groups = np.unique(pair_groups)
+    shuffled_groups = unique_groups[rng.permutation(unique_groups.size)]
+    train_groups_end = int(len(shuffled_groups) * 0.8)
+    val_groups_end = int(len(shuffled_groups) * 0.9)
+    group_split = {
+        "train": set(shuffled_groups[:train_groups_end].tolist()),
+        "val": set(shuffled_groups[train_groups_end:val_groups_end].tolist()),
+        "test": set(shuffled_groups[val_groups_end:].tolist()),
     }
+    portions = {
+        split: first_indices[
+            np.fromiter(
+                (int(pair_groups[index]) in groups for index in range(len(pair_groups))),
+                dtype=bool,
+                count=len(pair_groups),
+            )
+        ]
+        for split, groups in group_split.items()
+    }
+    for indices in portions.values():
+        rng.shuffle(indices)
 
     split_counts: dict[str, int] = {}
     class_counts: dict[str, dict[str, int]] = {"black": {}, "white": {}}
@@ -225,6 +274,12 @@ def _write_dual_splits(
             "hashes": np.lib.format.open_memmap(
                 output / f"{split}_hashes.npy", mode="w+", dtype=np.uint64, shape=(count,)
             ),
+            "pair_hashes": np.lib.format.open_memmap(
+                output / f"{split}_pair_hashes.npy",
+                mode="w+",
+                dtype=np.uint64,
+                shape=(count,),
+            ),
         }
         sources = {
             "moves": moves,
@@ -232,6 +287,7 @@ def _write_dual_splits(
             "black_labels": black,
             "white_labels": white,
             "hashes": hashes,
+            "pair_hashes": pair_hashes,
         }
         block = 131_072
         for start in range(0, count, block):
@@ -251,7 +307,7 @@ def _write_dual_splits(
         if pre_shuffle:
             shuffle_split(output / split, seed + _SPLITS.index(split), shuffle_block_size)
 
-    return split_counts, class_counts, fingerprint.hexdigest()
+    return split_counts, class_counts, fingerprint.hexdigest(), conflicting_groups
 
 
 def run(args: argparse.Namespace) -> None:
@@ -262,8 +318,26 @@ def run(args: argparse.Namespace) -> None:
         shutil.rmtree(shard_root)
     shard_root.mkdir(parents=True)
 
-    for path in output.glob("*.npy"):
-        path.unlink()
+    known_arrays = {
+        "_all_moves.npy",
+        "_all_lengths.npy",
+        "_all_black_labels.npy",
+        "_all_white_labels.npy",
+        "_all_hashes.npy",
+        "_all_pair_hashes.npy",
+    }
+    for split in _SPLITS:
+        for name in (
+            "moves",
+            "lengths",
+            "black_labels",
+            "white_labels",
+            "hashes",
+            "pair_hashes",
+        ):
+            known_arrays.add(f"{split}_{name}.npy")
+    for name in known_arrays:
+        (output / name).unlink(missing_ok=True)
     for name in ("manifest.json", "labels.json", "train.shuffled", "val.shuffled", "test.shuffled"):
         (output / name).unlink(missing_ok=True)
 
@@ -289,12 +363,19 @@ def run(args: argparse.Namespace) -> None:
             stats[rank] = rank_stats
 
     combined = _concat_rank_shards(shard_root, selected_ranks, output)
-    split_counts, class_counts, fingerprint = _write_dual_splits(
+    split_counts, class_counts, fingerprint, conflicting_groups = _write_dual_splits(
         output, args.seed, args.pre_shuffle, args.shuffle_block_size
     )
     shutil.rmtree(shard_root)
-    for path in output.glob("_all_*.npy"):
-        path.unlink()
+    for name in (
+        "_all_moves.npy",
+        "_all_lengths.npy",
+        "_all_black_labels.npy",
+        "_all_white_labels.npy",
+        "_all_hashes.npy",
+        "_all_pair_hashes.npy",
+    ):
+        (output / name).unlink(missing_ok=True)
 
     labels = {str(index): rank for index, rank in enumerate(RANKS)}
     (output / "labels.json").write_text(
@@ -316,6 +397,7 @@ def run(args: argparse.Namespace) -> None:
         "splits": split_counts,
         "class_counts": class_counts,
         "fingerprint": fingerprint,
+        "deduplication": {"conflicting_rank_groups": conflicting_groups},
         "source_counts": combined,
         "source_stats": stats,
     }

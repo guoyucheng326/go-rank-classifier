@@ -40,8 +40,10 @@ copy_artifact metrics json
 copy_artifact test_metrics json
 copy_artifact test_black_metrics json
 copy_artifact test_black_metrics_per_class csv
+copy_artifact test_black_metrics_confusion npy
 copy_artifact test_white_metrics json
 copy_artifact test_white_metrics_per_class csv
+copy_artifact test_white_metrics_confusion npy
 
 "$PYTHON" - "$TAG" "$RUN_DIR" <<'PY'
 import csv
@@ -89,7 +91,14 @@ if rows:
             return str(int(number))
         return f"{number:.6f}".rstrip("0").rstrip(".")
 
-    header = ["epoch", "train_loss", "val_accuracy", "val_top3_accuracy", "lr", "seconds", "partial", "stop_reason"]
+    header = [
+        "epoch", "train_loss",
+        "black_accuracy", "white_accuracy",
+        "black_top3_accuracy", "white_top3_accuracy",
+        "black_macro_f1", "white_macro_f1",
+        "black_within_1", "white_within_1",
+        "monitor_score", "lr", "seconds", "partial", "stop_reason",
+    ]
     header = [name for name in header if name in rows[0]]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("| " + " | ".join("---" for _ in header) + " |")

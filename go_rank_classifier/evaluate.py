@@ -37,6 +37,15 @@ def run(args: argparse.Namespace) -> dict:
     model.load_state_dict(state["model_state"])
 
     data = load_split(Path(args.data) / args.split)
+    if kata is not None:
+        if data.hashes is None or kata.hashes is None:
+            raise ValueError("Missing per-row hashes for KataGo feature verification")
+        selected = np.flatnonzero(np.asarray(kata.mask))
+        if not np.array_equal(
+            np.asarray(data.hashes[selected]),
+            np.asarray(kata.hashes[selected]),
+        ):
+            raise ValueError("KataGo features are not aligned with the SGF data")
     labels_black = labels_white = None
     probabilities_black = probabilities_white = None
     for cutoff in sorted(set(args.cutoffs)):

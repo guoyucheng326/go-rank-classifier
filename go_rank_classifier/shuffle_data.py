@@ -14,7 +14,7 @@ def shuffle_split(prefix: Path, seed: int, block_size: int) -> None:
     marker_path = prefix.with_name(f"{prefix.name}.shuffled")
     optional_paths = [
         prefix.with_name(f"{prefix.name}_{name}.npy")
-        for name in ("black_labels", "white_labels", "hashes")
+        for name in ("black_labels", "white_labels", "hashes", "pair_hashes")
     ]
     optional_paths = [path for path in optional_paths if path.is_file()]
     if not all(path.is_file() for path in (moves_path, lengths_path)):

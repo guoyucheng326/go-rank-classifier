@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from go_rank_classifier.features import PASS_MOVE, board_features, transform_mov
 from go_rank_classifier.katago_features import (
     FEATURE_NAMES,
     aggregate_player,
+    generate_resumable,
     make_query,
     parse_move_sample,
     select_positions,
@@ -156,11 +158,13 @@ class DatasetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             save_dual_prefix(root, "train", [(0, 1), (2, 3)])
-            kata_black = np.ones((2, len(FEATURE_NAMES)), np.float32)
-            kata_white = np.zeros((2, len(FEATURE_NAMES)), np.float32)
+            kata_black = np.ones((2, 2, len(FEATURE_NAMES)), np.float32)
+            kata_white = np.zeros((2, 2, len(FEATURE_NAMES)), np.float32)
             np.save(root / "train_katago_black.npy", kata_black)
             np.save(root / "train_katago_white.npy", kata_white)
             np.save(root / "train_katago_mask.npy", np.array([True, False]))
+            np.save(root / "train_katago_hashes.npy", np.array([0, 1], np.uint64))
+            (root / "train_katago_cutoffs.json").write_text("[100, 300]")
             split = load_split(root / "train")
             kata = KataGoFeatureData.load(root / "train")
             dataset = SGFGameDataset(split, training=False, katago=kata)
@@ -222,6 +226,70 @@ class KataGoFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(sample["visit_ratio"], 0.25)
         self.assertAlmostEqual(sample["winrate_loss"], 0.05)
         self.assertAlmostEqual(sample["score_loss"], 1.0)
+
+    def test_resumable_generation_from_cached_responses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "data"
+            output_dir = root / "features"
+            data_dir.mkdir()
+            save_dual_prefix(data_dir, "train", [(1, 10)])
+            (data_dir / "manifest.json").write_text(json.dumps({"fingerprint": "abc"}))
+            responses = root / "responses.jsonl"
+            responses.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "id": "train:0",
+                                "turnNumber": 0,
+                                "rootInfo": {"winrate": 0.5, "scoreLead": 0},
+                                "moveInfos": [
+                                    {"move": "A19", "visits": 4, "winrate": 0.5, "scoreLead": 0}
+                                ],
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "id": "train:0",
+                                "turnNumber": 1,
+                                "rootInfo": {"winrate": 0.5, "scoreLead": 0},
+                                "moveInfos": [
+                                    {"move": "B19", "visits": 4, "winrate": 0.5, "scoreLead": 0}
+                                ],
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+            arguments = dict(
+                katago_bin=None,
+                model=None,
+                config=None,
+                rules="chinese",
+                komi=7.5,
+                max_visits=5,
+                positions_per_player=1,
+                games_per_class=0,
+                job_size=1,
+                seed=2,
+                cutoffs=(100, 300),
+                responses=responses,
+                keep_queries=False,
+            )
+            manifest = generate_resumable(
+                data_dir, "train", output_dir, **arguments
+            )
+            self.assertEqual(manifest["complete_games"], 1)
+            self.assertEqual(
+                np.load(output_dir / "train_katago_black.npy").shape,
+                (1, 2, len(FEATURE_NAMES)),
+            )
+            resumed = generate_resumable(
+                data_dir, "train", output_dir, **arguments
+            )
+            self.assertEqual(resumed["completed_jobs"], 1)
 
 
 class MetricAndModelTests(unittest.TestCase):

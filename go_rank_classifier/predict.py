@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +28,11 @@ class RankPredictor:
         decoder: str = "expected",
         katago_black: str | Path | None = None,
         katago_white: str | Path | None = None,
+        katago_cutoffs: tuple[int, ...] = (100, 150, 200, 250, 300),
+        katago_bin: str | Path | None = None,
+        katago_model: str | Path | None = None,
+        katago_config: str | Path | None = None,
+        katago_visits: int = 500,
     ) -> None:
         self.device = torch.device(
             device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,19 +56,90 @@ class RankPredictor:
         self.decoder = decoder
         self.katago_black = self._load_tabular(katago_black)
         self.katago_white = self._load_tabular(katago_white)
-        if self.tabular_features and (
+        self.online_features = katago_black is None and katago_white is None
+        if self.tabular_features and not self.online_features and (
             self.katago_black is None or self.katago_white is None
         ):
+            raise ValueError("Provide both KataGo feature files or neither")
+        self.katago_cutoffs = tuple(sorted(set(katago_cutoffs)))
+        self.katago_bin = katago_bin
+        self.katago_model = katago_model
+        self.katago_config = katago_config
+        self.katago_visits = katago_visits
+        if self.tabular_features and (
+            self.katago_black is not None
+            and self.katago_black.shape[0] != len(self.katago_cutoffs)
+        ):
+            raise ValueError("KataGo feature rows must match --katago-cutoffs")
+        if self.tabular_features and (
+            self.katago_white is not None
+            and self.katago_white.shape[0] != len(self.katago_cutoffs)
+        ):
+            raise ValueError("KataGo feature rows must match --katago-cutoffs")
+
+    def analyze_game(self, game) -> None:
+        if game.handicap != 0 or game.has_setup_stones:
+            raise ValueError("Online analysis supports only HA=0 games without setup stones")
+        if not all((self.katago_bin, self.katago_model, self.katago_config)):
             raise ValueError(
-                "This checkpoint requires --katago-black and --katago-white feature files"
+                "Provide --katago-black/--katago-white or all KataGo engine paths"
             )
+        from .katago_features import generate_resumable
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "data"
+            features_dir = root / "features"
+            data_dir.mkdir()
+            moves = np.full((1, 300), -1, dtype=np.int16)
+            truncated = np.asarray(game.truncated_moves(), dtype=np.int16)
+            moves[0, : len(truncated)] = truncated
+            digest = hashlib.blake2b(truncated.tobytes(), digest_size=8).digest()
+            np.save(data_dir / "train_moves.npy", moves)
+            np.save(data_dir / "train_lengths.npy", np.array([len(truncated)], np.int16))
+            np.save(data_dir / "train_black_labels.npy", np.array([0], np.int16))
+            np.save(data_dir / "train_white_labels.npy", np.array([0], np.int16))
+            np.save(
+                data_dir / "train_hashes.npy",
+                np.array([int.from_bytes(digest, "little")], np.uint64),
+            )
+            fingerprint = int.from_bytes(digest, "little")
+            (data_dir / "manifest.json").write_text(
+                json.dumps({"fingerprint": f"{fingerprint:016x}"})
+            )
+            generate_resumable(
+                data_dir,
+                "train",
+                features_dir,
+                katago_bin=str(self.katago_bin),
+                model=str(self.katago_model),
+                config=str(self.katago_config),
+                rules="chinese",
+                komi=7.5,
+                max_visits=self.katago_visits,
+                positions_per_player=0,
+                games_per_class=0,
+                job_size=1,
+                seed=0,
+                cutoffs=self.katago_cutoffs,
+            )
+            self.katago_black = np.load(
+                features_dir / "train_katago_black.npy"
+            )[0]
+            self.katago_white = np.load(
+                features_dir / "train_katago_white.npy"
+            )[0]
 
     @staticmethod
     def _load_tabular(path: str | Path | None) -> np.ndarray | None:
         if path is None:
             return None
-        values = np.load(path)
-        return np.asarray(values).reshape(-1)
+        values = np.asarray(np.load(path))
+        if values.ndim == 3 and values.shape[0] == 1:
+            values = values[0]
+        if values.ndim != 2:
+            raise ValueError("KataGo inference features must have shape (cutoffs, features)")
+        return values
 
     def predict_moves(self, moves: list[int]) -> np.ndarray:
         if not 100 <= len(moves) <= 350:
@@ -75,33 +153,46 @@ class RankPredictor:
         )
         if not valid_cutoffs:
             valid_cutoffs = [min(300, len(moves))]
-        views: list[torch.Tensor] = []
+        all_logits: list[torch.Tensor] = []
         for cutoff in valid_cutoffs:
             selected = moves[:cutoff]
             features = board_features(selected, len(selected))
             tensor = torch.from_numpy(features).unsqueeze(0)
-            views.extend(
+            views = [
                 transform_features(tensor, symmetry) for symmetry in self.symmetries
-            )
-        batch = torch.cat(views, dim=0).to(self.device)
-        tabular = None
-        if self.tabular_features:
-            black = self.katago_black
-            white = self.katago_white
-            assert black is not None and white is not None
-            tabular = torch.from_numpy(
-                np.concatenate((black, white, black - white)).astype(np.float32)
-            ).repeat(batch.shape[0], 1).to(self.device)
+            ]
+            batch = torch.cat(views, dim=0).to(self.device)
+            tabular = None
+            if self.tabular_features:
+                eligible = [
+                    index
+                    for index, value in enumerate(self.katago_cutoffs)
+                    if value <= cutoff
+                ]
+                feature_index = eligible[-1] if eligible else 0
+                black = self.katago_black[feature_index]
+                white = self.katago_white[feature_index]
+                tabular = torch.from_numpy(
+                    np.concatenate((black, white, black - white)).astype(np.float32)
+                ).repeat(batch.shape[0], 1).to(self.device)
+            with torch.inference_mode():
+                logits = self.model(batch, tabular)
+                all_logits.append(
+                    torch.softmax(
+                        logits[0] if self.player == "black" else logits[1],
+                        dim=1,
+                    ).mean(dim=0)
+                )
         with torch.inference_mode():
-            black_logits, white_logits = self.model(batch, tabular)
-            logits = black_logits if self.player == "black" else white_logits
-            probability = torch.softmax(logits, dim=1).mean(dim=0).cpu().numpy()
+            probability = torch.stack(all_logits).mean(dim=0).cpu().numpy()
         return probability
 
     def predict_file(self, path: str | Path) -> tuple[int, str, float]:
         game = parse_sgf_file(path)
         if game.board_size != 19:
             raise ValueError(f"Expected a 19x19 SGF, got {game.board_size}x{game.board_size}")
+        if self.tabular_features and self.online_features:
+            self.analyze_game(game)
         probability = self.predict_moves(list(game.moves))
         rank_id = int(decode_probabilities(probability[None, :], self.decoder)[0])
         strength = float(expected_strength(probability[None, :])[0])
@@ -121,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decode", choices=DECODERS, default="expected")
     parser.add_argument("--katago-black")
     parser.add_argument("--katago-white")
+    parser.add_argument("--katago-cutoffs", nargs="+", type=int, default=(100, 150, 200, 250, 300))
+    parser.add_argument("--katago-bin")
+    parser.add_argument("--katago-model")
+    parser.add_argument("--katago-config")
+    parser.add_argument("--katago-visits", type=int, default=500)
     return parser
 
 
@@ -135,9 +231,16 @@ def main() -> None:
         decoder=args.decode,
         katago_black=args.katago_black,
         katago_white=args.katago_white,
+        katago_cutoffs=tuple(args.katago_cutoffs),
+        katago_bin=args.katago_bin,
+        katago_model=args.katago_model,
+        katago_config=args.katago_config,
+        katago_visits=args.katago_visits,
     )
     for path in args.sgf:
         game = parse_sgf_file(path)
+        if predictor.tabular_features and predictor.online_features:
+            predictor.analyze_game(game)
         probability = predictor.predict_moves(list(game.moves))
         rank_id = int(decode_probabilities(probability[None, :], args.decode)[0])
         strength = float(expected_strength(probability[None, :])[0])

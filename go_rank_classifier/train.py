@@ -65,6 +65,17 @@ def verify_feature_fingerprint(data_dir: Path, kata_dir: Path, split: str) -> No
         )
 
 
+def verify_feature_hashes(data, features, split: str) -> None:
+    if data.hashes is None or features.hashes is None:
+        raise ValueError(f"Missing per-row hashes for {split}")
+    selected = np.flatnonzero(np.asarray(features.mask))
+    if not np.array_equal(
+        np.asarray(data.hashes[selected]),
+        np.asarray(features.hashes[selected]),
+    ):
+        raise ValueError(f"KataGo rows are misaligned with the SGF split: {split}")
+
+
 def make_criterion(weights: np.ndarray, args: argparse.Namespace, device: torch.device):
     weight_tensor = torch.from_numpy(weights).to(device)
     if args.loss == "ordinal-soft":
@@ -98,6 +109,64 @@ def evaluate_dual(
     )
 
 
+def evaluate_dual_tta(
+    model: nn.Module,
+    data,
+    *,
+    device: torch.device,
+    cutoffs: tuple[int, ...],
+    symmetries: tuple[int, ...],
+    decoder: str,
+    batch_size: int,
+    workers: int,
+    limit: int | None,
+    katago,
+) -> tuple[dict, dict]:
+    labels_black = labels_white = None
+    probabilities_black = probabilities_white = None
+    for cutoff in sorted(set(cutoffs)):
+        dataset = SGFGameDataset(
+            data,
+            training=False,
+            fixed_cutoff=cutoff,
+            limit=limit,
+            katago=katago,
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=workers,
+            pin_memory=device.type == "cuda",
+        )
+        current_black, current_white, prob_black, prob_white = predict_dual_loader(
+            model, loader, device, symmetries=symmetries
+        )
+        if labels_black is None:
+            labels_black, labels_white = current_black, current_white
+            probabilities_black, probabilities_white = prob_black, prob_white
+        else:
+            if not (current_black == labels_black).all() or not (
+                current_white == labels_white
+            ).all():
+                raise RuntimeError("Dataset order changed between cutoff passes")
+            probabilities_black += prob_black
+            probabilities_white += prob_white
+    assert (
+        labels_black is not None
+        and labels_white is not None
+        and probabilities_black is not None
+        and probabilities_white is not None
+    )
+    divisor = len(set(cutoffs))
+    probabilities_black /= divisor
+    probabilities_white /= divisor
+    return (
+        probability_metrics(labels_black, probabilities_black, decoder),
+        probability_metrics(labels_white, probabilities_white, decoder),
+    )
+
+
 def composite_score(black: dict, white: dict) -> float:
     return 0.5 * (black["composite"] + white["composite"])
 
@@ -123,7 +192,10 @@ def run(args: argparse.Namespace) -> None:
             verify_feature_fingerprint(data_dir, kata_dir, split)
     train_kata = KataGoFeatureData.load(kata_dir / "train") if kata_dir else None
     val_kata = KataGoFeatureData.load(kata_dir / "val") if kata_dir else None
-    feature_count = train_kata.black.shape[1] if train_kata is not None else 0
+    if train_kata is not None and val_kata is not None:
+        verify_feature_hashes(train_data, train_kata, "train")
+        verify_feature_hashes(val_data, val_kata, "val")
+    feature_count = train_kata.black.shape[2] if train_kata is not None else 0
     tabular_features = feature_count * 3
 
     train_dataset = SGFGameDataset(
@@ -133,21 +205,7 @@ def run(args: argparse.Namespace) -> None:
         limit=args.limit_train,
         katago=train_kata,
     )
-    val_dataset = SGFGameDataset(
-        val_data,
-        training=False,
-        seed=args.seed,
-        limit=args.limit_val,
-        katago=val_kata,
-    )
     loader_options = {"num_workers": args.workers, "pin_memory": True}
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        persistent_workers=args.workers > 0,
-        **loader_options,
-    )
 
     model = DualGoRankCNN(
         num_classes=len(RANKS),
@@ -356,12 +414,17 @@ def run(args: argparse.Namespace) -> None:
 
         if not stopped_early and scheduler is not None:
             scheduler.step()
-        black_metrics, white_metrics = evaluate_dual(
+        black_metrics, white_metrics = evaluate_dual_tta(
             model,
-            val_loader,
-            device,
+            val_data,
+            device=device,
+            cutoffs=tuple(args.val_cutoffs),
             symmetries=tuple(range(args.val_symmetries)),
             decoder=args.decode,
+            batch_size=args.batch_size,
+            workers=args.workers,
+            limit=args.limit_val,
+            katago=val_kata,
         )
         monitor_score = 0.5 * (
             black_metrics[args.early_stop_metric]
@@ -478,6 +541,8 @@ def run(args: argparse.Namespace) -> None:
         if kata_dir is not None:
             verify_feature_fingerprint(data_dir, kata_dir, "test")
         test_kata = KataGoFeatureData.load(kata_dir / "test") if kata_dir else None
+        if test_kata is not None:
+            verify_feature_hashes(test_data, test_kata, "test")
         labels_black = labels_white = None
         probabilities_black = probabilities_white = None
         for cutoff in sorted(set(args.test_cutoffs)):
@@ -571,6 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-delta", type=float, default=0.0005)
     parser.add_argument("--checkpoint-every-batches", type=int, default=500)
     parser.add_argument("--val-symmetries", type=int, choices=range(1, 9), default=1)
+    parser.add_argument("--val-cutoffs", nargs="+", type=int, default=(300,))
     parser.add_argument("--test-symmetries", type=int, choices=range(1, 9), default=8)
     parser.add_argument("--test-cutoffs", nargs="+", type=int, default=(200, 250, 300))
     parser.add_argument(

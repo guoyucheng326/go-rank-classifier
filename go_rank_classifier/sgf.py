@@ -28,6 +28,8 @@ class ParsedSGF:
     rules: str = ""
     komi: float | None = None
     has_setup_stones: bool = False
+    black_name: str = ""
+    white_name: str = ""
 
     @property
     def move_count(self) -> int:
@@ -132,6 +134,8 @@ def parse_sgf_bytes(raw: bytes) -> ParsedSGF:
         rules=(first("RU") or "").strip(),
         komi=komi,
         has_setup_stones=bool(properties.get("AB") or properties.get("AW")),
+        black_name=(first("PB") or "").strip(),
+        white_name=(first("PW") or "").strip(),
     )
 
 

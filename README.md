@@ -33,7 +33,8 @@ The model predicts:
 - Require `HA[0]` and no `AB`/`AW` setup stones.
 - Reject non-19x19 games.
 - Deduplicate exact main-line move sequences before splitting.
-- Split by game after deduplication.
+- Reject duplicate sequences carrying conflicting black/white labels.
+- Keep the same black/white player pair in the same split.
 
 `BR` and `WR` are used only as labels. They are never model inputs.
 
@@ -54,6 +55,7 @@ train_lengths.npy
 train_black_labels.npy
 train_white_labels.npy
 train_hashes.npy
+train_pair_hashes.npy
 ...same files for val and test...
 manifest.json
 ```
@@ -77,6 +79,7 @@ MAX_VISITS=500 \
 POSITIONS_PER_PLAYER=0 \
 GAMES_PER_CLASS=0 \
 JOB_SIZE=500 \
+CUTOFFS="100 150 200 250 300" \
 scripts/build_katago_features.sh
 ```
 
@@ -117,8 +120,9 @@ GAMES_PER_CLASS=500 POSITIONS_PER_PLAYER=8 scripts/build_katago_features.sh
 The generator saves:
 
 - compact per-move metrics in sharded `.npz` files
-- separate black/white aggregated feature matrices
+- separate black/white aggregated matrices for every cutoff
 - a mask identifying games with complete requested analysis
+- per-row game hashes for alignment verification
 - feature names and fixed engine metadata
 
 The aggregated features include:
@@ -131,7 +135,9 @@ The aggregated features include:
 - policy entropy
 - layout, middle-game, and late-game summaries
 
-Training never invokes KataGo. It reads the cached feature matrices.
+Training never invokes KataGo. It reads the cached feature matrices. Each
+analysis job is committed independently, so an interrupted full run resumes
+from the next unfinished job rather than restarting the whole split.
 
 ## Train
 
@@ -163,6 +169,9 @@ Default paths:
 | `EPOCHS` | `12` |
 | `TEST_SYMMETRIES` | `8` |
 | `TEST_CUTOFFS` | `200 250 300` |
+| `VAL_SYMMETRIES` | `4` |
+| `VAL_CUTOFFS` | `200 250 300` |
+| `VAL_LIMIT` | `50000` |
 | `DECODE` | `expected` |
 
 To resume an existing model into a new experiment directory:
@@ -206,11 +215,25 @@ python -m go_rank_classifier.predict \
   --player white \
   --katago-black black_features.npy \
   --katago-white white_features.npy \
+  --katago-cutoffs 100 150 200 250 300 \
   game.sgf
 ```
 
-The two feature files each contain one row of features for the corresponding
+The two feature files each contain one row per cutoff for the corresponding
 player. `--player` is required because one SGF has two different rank targets.
+
+To run KataGo for a new SGF during inference:
+
+```bash
+python -m go_rank_classifier.predict \
+  --checkpoint runs/go_rank_v2/best.pt \
+  --player black \
+  --katago-bin /home/amax/guojianren/.tools/katago-opencl/katago \
+  --katago-model /home/amax/guojianren/.tools/katago-models/current-transformer.bin.gz \
+  --katago-config /home/amax/guojianren/.tools/katago-opencl/analysis_config.cfg \
+  --katago-visits 500 \
+  game.sgf
+```
 
 ## Duplicate audit
 

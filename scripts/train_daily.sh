@@ -29,6 +29,9 @@ MIN_DELTA="${MIN_DELTA:-0.0005}"
 CHECKPOINT_EVERY_BATCHES="${CHECKPOINT_EVERY_BATCHES:-500}"
 TEST_SYMMETRIES="${TEST_SYMMETRIES:-8}"
 TEST_CUTOFFS="${TEST_CUTOFFS:-200 250 300}"
+VAL_SYMMETRIES="${VAL_SYMMETRIES:-4}"
+VAL_CUTOFFS="${VAL_CUTOFFS:-200 250 300}"
+VAL_LIMIT="${VAL_LIMIT:-50000}"
 DECODE="${DECODE:-expected}"
 MAX_SECONDS="${MAX_SECONDS:-}"
 USE_KATAGO="${USE_KATAGO:-1}"
@@ -82,6 +85,11 @@ if [[ -n "$MAX_SECONDS" ]]; then
   TIME_ARGS=(--max-seconds "$MAX_SECONDS")
 fi
 read -r -a TEST_CUTOFF_ARGS <<< "$TEST_CUTOFFS"
+read -r -a VAL_CUTOFF_ARGS <<< "$VAL_CUTOFFS"
+VAL_LIMIT_ARGS=()
+if [[ -n "$VAL_LIMIT" ]]; then
+  VAL_LIMIT_ARGS=(--limit-val "$VAL_LIMIT")
+fi
 
 "$PYTHON" -m go_rank_classifier.train \
   --data "$DATA_DIR" \
@@ -104,6 +112,9 @@ read -r -a TEST_CUTOFF_ARGS <<< "$TEST_CUTOFFS"
   --checkpoint-every-batches "$CHECKPOINT_EVERY_BATCHES" \
   --test-symmetries "$TEST_SYMMETRIES" \
   --test-cutoffs "${TEST_CUTOFF_ARGS[@]}" \
+  --val-symmetries "$VAL_SYMMETRIES" \
+  --val-cutoffs "${VAL_CUTOFF_ARGS[@]}" \
+  "${VAL_LIMIT_ARGS[@]}" \
   --decode "$DECODE" \
   "${RESUME_ARGS[@]}" \
   "${TIME_ARGS[@]}"
